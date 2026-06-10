@@ -35,7 +35,7 @@
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
       "runAfterFinish": true,
-      "deleteAppDataOnUninstall": true
+      "include": "build/uninstaller.nsh"
     },
     "asar": true
   },
