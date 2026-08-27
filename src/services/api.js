@@ -138,21 +138,25 @@ export const api = {
 
   // Medicines
   exportMedicinesCSV: () => fetchCSVText('/medicines/export/csv'),
+  getMedicineSampleCSV: () => fetchCSVText('/medicines/sample/csv'),
   importMedicinesCSV: (text) => postCSVText('/medicines/import/csv', text),
   updateMedicinesCSV: (text) => putCSVText('/medicines/import/csv', text),
 
   // Customers
   exportCustomersCSV: () => fetchCSVText('/customers/export/csv'),
+  getCustomerSampleCSV: () => fetchCSVText('/customers/sample/csv'),
   importCustomersCSV: (text) => postCSVText('/customers/import/csv', text),
   updateCustomersCSV: (text) => putCSVText('/customers/import/csv', text),
 
   // Doctors
   exportDoctorsCSV: () => fetchCSVText('/doctors/export/csv'),
+  getDoctorSampleCSV: () => fetchCSVText('/doctors/sample/csv'),
   importDoctorsCSV: (text) => postCSVText('/doctors/import/csv', text),
   updateDoctorsCSV: (text) => putCSVText('/doctors/import/csv', text),
 
   // Suppliers
   exportSuppliersCSV: () => fetchCSVText('/suppliers/export/csv'),
+  getSupplierSampleCSV: () => fetchCSVText('/suppliers/sample/csv'),
   importSuppliersCSV: (text) => postCSVText('/suppliers/import/csv', text),
   updateSuppliersCSV: (text) => putCSVText('/suppliers/import/csv', text),
 };

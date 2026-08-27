@@ -143,4 +143,79 @@ function escapeCSVField(value) {
   return str;
 }
 
-module.exports = { parseCSV, toCSV };
+/**
+ * Normalize human date strings (e.g. "12/27", "12/2027", "25-11-2027", "2027-12-31") into standard "YYYY-MM-DD".
+ */
+function normalizeDate(str, defaultDaysFromNow = 730) {
+  if (!str) {
+    if (!defaultDaysFromNow) return null;
+    const d = new Date();
+    d.setDate(d.getDate() + defaultDaysFromNow);
+    return d.toISOString().slice(0, 10);
+  }
+  const s = String(str).trim();
+  if (!s) return null;
+
+  // 1. YYYY-MM-DD or YYYY/MM/DD
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+  if (/^\d{4}\/\d{2}\/\d{2}$/.test(s)) return s.replace(/\//g, '-');
+
+  // 2. DD-MM-YYYY or DD/MM/YYYY
+  const dmy = s.match(/^(\d{1,2})[-/](\d{1,2})[-/](\d{4})$/);
+  if (dmy) {
+    const day = dmy[1].padStart(2, '0');
+    const mon = dmy[2].padStart(2, '0');
+    const year = dmy[3];
+    return `${year}-${mon}-${day}`;
+  }
+
+  // 3. MM/YY or MM-YY (e.g. 12/27 -> 2027-12-31)
+  const myShort = s.match(/^(\d{1,2})[-/](\d{2})$/);
+  if (myShort) {
+    const mon = parseInt(myShort[1], 10);
+    const yr = 2000 + parseInt(myShort[2], 10);
+    if (mon >= 1 && mon <= 12) {
+      const lastDay = new Date(yr, mon, 0).getDate();
+      return `${yr}-${String(mon).padStart(2, '0')}-${String(lastDay).padStart(2, '0')}`;
+    }
+  }
+
+  // 4. MM/YYYY or MM-YYYY (e.g. 12/2027 -> 2027-12-31)
+  const myLong = s.match(/^(\d{1,2})[-/](\d{4})$/);
+  if (myLong) {
+    const mon = parseInt(myLong[1], 10);
+    const yr = parseInt(myLong[2], 10);
+    if (mon >= 1 && mon <= 12) {
+      const lastDay = new Date(yr, mon, 0).getDate();
+      return `${yr}-${String(mon).padStart(2, '0')}-${String(lastDay).padStart(2, '0')}`;
+    }
+  }
+
+  // 5. YYYY-MM or YYYY/MM (e.g. 2027-12 -> 2027-12-31)
+  const ym = s.match(/^(\d{4})[-/](\d{1,2})$/);
+  if (ym) {
+    const yr = parseInt(ym[1], 10);
+    const mon = parseInt(ym[2], 10);
+    if (mon >= 1 && mon <= 12) {
+      const lastDay = new Date(yr, mon, 0).getDate();
+      return `${yr}-${String(mon).padStart(2, '0')}-${String(lastDay).padStart(2, '0')}`;
+    }
+  }
+
+  // Fallback
+  const parsed = new Date(s);
+  if (!isNaN(parsed.getTime())) {
+    return parsed.toISOString().slice(0, 10);
+  }
+
+  if (defaultDaysFromNow) {
+    const d = new Date();
+    d.setDate(d.getDate() + defaultDaysFromNow);
+    return d.toISOString().slice(0, 10);
+  }
+
+  return null;
+}
+
+module.exports = { parseCSV, toCSV, normalizeDate };
+

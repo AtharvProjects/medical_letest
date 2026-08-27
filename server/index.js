@@ -8,7 +8,7 @@ const { encrypt, decrypt } = require('./encryption');
 const { createBackup, maybeAutoBackup, listBackups, deleteBackup } = require('./backup');
 const { splitInclusive, round2, perUnitCost } = require('./money');
 const { logAction } = require('./audit');
-const { parseCSV, toCSV } = require('./csv');
+const { parseCSV, toCSV, normalizeDate } = require('./csv');
 
 // Per-line COGS as a SQL expression, shared by every profit/margin query so the
 // costing stays identical everywhere. `ii`=invoice_items, `b`=batches, `m`=medicines.
@@ -597,15 +597,218 @@ app.post('/api/medicines/bulk', (req, res) => {
 });
 
 // ── Medicine CSV Export / Import / Update ─────────────────────────────────
-const MED_CSV_COLS = ['id','alias','brand_name','generic_name','company_name','drug_group','unit_category','hsn_code','gst_percent','schedule','is_h1','tablets_per_strip'];
-const MED_CSV_LABELS = { id:'ID', alias:'Alias', brand_name:'Brand Name', generic_name:'Generic Name', company_name:'Company', drug_group:'Drug Group', unit_category:'Unit Category', hsn_code:'HSN Code', gst_percent:'GST %', schedule:'Schedule', is_h1:'Is H1', tablets_per_strip:'Tablets Per Strip' };
+const MED_CSV_COLS = [
+  'id', 'brand_name', 'alias', 'generic_name', 'company_name', 'drug_group',
+  'unit_category', 'tablets_per_strip', 'hsn_code', 'gst_percent', 'schedule', 'is_h1',
+  'batch_number', 'expiry_date', 'mfg_date', 'purchase_rate', 'selling_rate', 'mrp', 'quantity'
+];
+const MED_CSV_LABELS = {
+  id: 'ID',
+  brand_name: 'Brand Name',
+  alias: 'Alias',
+  generic_name: 'Generic Name',
+  company_name: 'Company',
+  drug_group: 'Drug Group',
+  unit_category: 'Unit Category',
+  tablets_per_strip: 'Tablets Per Strip',
+  hsn_code: 'HSN Code',
+  gst_percent: 'GST %',
+  schedule: 'Schedule',
+  is_h1: 'Is H1',
+  batch_number: 'Batch Number',
+  expiry_date: 'Expiry Date',
+  mfg_date: 'Mfg Date',
+  purchase_rate: 'Purchase Rate (Cost)',
+  selling_rate: 'Selling Rate (Price)',
+  mrp: 'MRP',
+  quantity: 'Stock Quantity'
+};
+
+const SAMPLE_MEDICINES = [
+  {
+    id: '',
+    brand_name: 'Dolo 650 Tablet',
+    alias: 'DOLO650',
+    generic_name: 'Paracetamol 650mg',
+    company_name: 'Micro Labs Ltd',
+    drug_group: 'Analgesic / Antipyretic',
+    unit_category: 'Tablet',
+    tablets_per_strip: 15,
+    hsn_code: '300490',
+    gst_percent: 12,
+    schedule: 'OTC',
+    is_h1: 0,
+    batch_number: 'DL2409',
+    expiry_date: '2027-12-31',
+    mfg_date: '2024-06-01',
+    purchase_rate: 25.50,
+    selling_rate: 32.00,
+    mrp: 35.00,
+    quantity: 150
+  },
+  {
+    id: '',
+    brand_name: 'Augmentin 625 Duo Tablet',
+    alias: 'AUG625',
+    generic_name: 'Amoxicillin 500mg + Clavulanic Acid 125mg',
+    company_name: 'GlaxoSmithKline (GSK)',
+    drug_group: 'Antibiotics',
+    unit_category: 'Tablet',
+    tablets_per_strip: 10,
+    hsn_code: '300410',
+    gst_percent: 12,
+    schedule: 'Schedule H1',
+    is_h1: 1,
+    batch_number: 'AG9981',
+    expiry_date: '2026-11-30',
+    mfg_date: '2024-10-01',
+    purchase_rate: 165.00,
+    selling_rate: 195.00,
+    mrp: 210.00,
+    quantity: 60
+  },
+  {
+    id: '',
+    brand_name: 'Benadryl Cough Syrup 100ml',
+    alias: 'BENA100',
+    generic_name: 'Diphenhydramine HCl 14.08mg',
+    company_name: 'Johnson & Johnson',
+    drug_group: 'Cough & Cold',
+    unit_category: 'Syrup',
+    tablets_per_strip: 1,
+    hsn_code: '300490',
+    gst_percent: 12,
+    schedule: 'OTC',
+    is_h1: 0,
+    batch_number: 'BN7712',
+    expiry_date: '2027-08-31',
+    mfg_date: '2024-08-01',
+    purchase_rate: 95.00,
+    selling_rate: 120.00,
+    mrp: 135.00,
+    quantity: 40
+  },
+  {
+    id: '',
+    brand_name: 'Pan 40 Tablet',
+    alias: 'PAN40',
+    generic_name: 'Pantoprazole 40mg',
+    company_name: 'Alkem Laboratories',
+    drug_group: 'Antacid',
+    unit_category: 'Tablet',
+    tablets_per_strip: 15,
+    hsn_code: '300490',
+    gst_percent: 12,
+    schedule: 'Schedule H',
+    is_h1: 0,
+    batch_number: 'PN4021',
+    expiry_date: '2027-05-31',
+    mfg_date: '2024-05-01',
+    purchase_rate: 88.00,
+    selling_rate: 125.00,
+    mrp: 145.00,
+    quantity: 80
+  }
+];
+
+function upsertMedicineBatchRecord(medId, m, isUpdateMode = false) {
+  const batchNum = (m.batch_number || m.batch || m.batch_no || '').trim();
+  const qty = parseInt(m.quantity || m.stock || m.qty || 0, 10) || 0;
+  const pr = parseFloat(m.purchase_rate || m.stock_rate || m.cost_price || m.purchase_price || m.rate || 0) || 0;
+  let sr = parseFloat(m.selling_rate || m.selling_price || m.sale_price || m.sale_rate || 0) || 0;
+  let mrp = parseFloat(m.mrp || m.max_retail_price || 0) || 0;
+  const expiryRaw = m.expiry_date || m.expiry || m.exp_date || m.exp;
+  const mfgRaw = m.mfg_date || m.mfg || m.mfg_date;
+
+  // If no batch info provided at all, return
+  if (!batchNum && qty === 0 && pr === 0 && sr === 0 && mrp === 0 && !expiryRaw) {
+    return;
+  }
+
+  const batchNumber = batchNum || 'B1';
+  const expiryDate = normalizeDate(expiryRaw, 730);
+  const mfgDate = normalizeDate(mfgRaw, null);
+
+  if (mrp > 0 && sr === 0) sr = mrp;
+  if (sr > 0 && mrp === 0) mrp = sr;
+  if (pr > 0 && sr === 0) sr = pr;
+  if (mrp > 0 && sr > mrp) sr = mrp;
+  if (pr > mrp && mrp > 0) mrp = pr;
+
+  const existingBatch = db.prepare('SELECT id, quantity FROM batches WHERE medicine_id = ? AND LOWER(TRIM(batch_number)) = LOWER(TRIM(?)) LIMIT 1').get(medId, batchNumber);
+
+  if (existingBatch) {
+    if (isUpdateMode) {
+      db.prepare(`
+        UPDATE batches 
+        SET mfg_date = COALESCE(?, mfg_date),
+            expiry_date = ?,
+            purchase_rate = CASE WHEN ? > 0 THEN ? ELSE purchase_rate END,
+            selling_rate = CASE WHEN ? > 0 THEN ? ELSE selling_rate END,
+            mrp = CASE WHEN ? > 0 THEN ? ELSE mrp END,
+            quantity = ?
+        WHERE id = ?
+      `).run(mfgDate, expiryDate, pr, pr, sr, sr, mrp, mrp, qty, existingBatch.id);
+    } else {
+      db.prepare(`
+        UPDATE batches 
+        SET mfg_date = COALESCE(?, mfg_date),
+            expiry_date = ?,
+            purchase_rate = CASE WHEN ? > 0 THEN ? ELSE purchase_rate END,
+            selling_rate = CASE WHEN ? > 0 THEN ? ELSE selling_rate END,
+            mrp = CASE WHEN ? > 0 THEN ? ELSE mrp END,
+            quantity = quantity + ?
+        WHERE id = ?
+      `).run(mfgDate, expiryDate, pr, pr, sr, sr, mrp, mrp, qty, existingBatch.id);
+    }
+  } else {
+    db.prepare(`
+      INSERT INTO batches (medicine_id, batch_number, mfg_date, expiry_date, purchase_rate, selling_rate, mrp, quantity)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(medId, batchNumber, mfgDate || '', expiryDate, pr, sr, mrp, qty);
+  }
+}
+
+app.get('/api/medicines/sample/csv', (req, res) => {
+  try {
+    const csv = toCSV(SAMPLE_MEDICINES, MED_CSV_COLS, MED_CSV_LABELS);
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', 'attachment; filename="sample_medicines_template.csv"');
+    res.send(csv);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
 
 app.get('/api/medicines/export/csv', (req, res) => {
   try {
-    const rows = db.prepare('SELECT * FROM medicines WHERE is_active = 1 ORDER BY brand_name').all();
+    const rows = db.prepare(`
+      SELECT 
+        m.id,
+        m.brand_name,
+        m.alias,
+        m.generic_name,
+        m.company_name,
+        m.drug_group,
+        m.unit_category,
+        m.tablets_per_strip,
+        m.hsn_code,
+        m.gst_percent,
+        m.schedule,
+        m.is_h1,
+        b.batch_number,
+        b.expiry_date,
+        b.mfg_date,
+        b.purchase_rate,
+        b.selling_rate,
+        b.mrp,
+        COALESCE(b.quantity, 0) as quantity
+      FROM medicines m
+      LEFT JOIN batches b ON b.medicine_id = m.id
+      WHERE m.is_active = 1
+      ORDER BY m.brand_name, b.expiry_date
+    `).all();
     const csv = toCSV(rows, MED_CSV_COLS, MED_CSV_LABELS);
     res.setHeader('Content-Type', 'text/csv; charset=utf-8');
-    res.setHeader('Content-Disposition', 'attachment; filename="medicines_export.csv"');
+    res.setHeader('Content-Disposition', 'attachment; filename="medicines_inventory_export.csv"');
     res.send(csv);
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
@@ -617,20 +820,46 @@ app.post('/api/medicines/import/csv', (req, res) => {
     if (!rows.length) return res.status(400).json({ error: 'CSV file is empty' });
 
     const result = { created: 0, updated: 0, skipped: 0, errors: [] };
-    const stmt = db.prepare(`INSERT INTO medicines (alias, brand_name, generic_name, company_name, drug_group, unit_category, hsn_code, gst_percent, schedule, is_h1, tablets_per_strip) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+    const findByName = db.prepare('SELECT id FROM medicines WHERE LOWER(brand_name) = LOWER(?) LIMIT 1');
+    const insertMedStmt = db.prepare(`INSERT INTO medicines (alias, brand_name, generic_name, company_name, drug_group, unit_category, hsn_code, gst_percent, schedule, is_h1, tablets_per_strip) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+    const updateMedStmt = db.prepare(`UPDATE medicines SET alias=?, brand_name=?, generic_name=?, company_name=?, drug_group=?, unit_category=?, hsn_code=?, gst_percent=?, schedule=?, is_h1=?, tablets_per_strip=?, updated_at=datetime('now','localtime') WHERE id=?`);
 
     const txn = db.transaction(() => {
       rows.forEach((m, idx) => {
         try {
           const name = m.brand_name || m.name;
           if (!name) { result.errors.push({ row: idx + 2, message: 'Missing brand_name' }); return; }
-          stmt.run(m.alias || '', name, m.generic_name || '', m.company_name || m.company || '', m.drug_group || m.group || '', m.unit_category || m.unit || 'Tablet', m.hsn_code || '', parseFloat(m.gst_percent || m.gst) || 12, m.schedule || '', (m.is_h1 === '1' || m.is_h1 === 'true') ? 1 : 0, parseInt(m.tablets_per_strip || m.strip_qty) || 10);
-          result.created++;
+
+          const alias = m.alias || '';
+          const gn = m.generic_name || '';
+          const cn = m.company_name || m.company || '';
+          const dg = m.drug_group || m.group || '';
+          const uc = m.unit_category || m.unit || 'Tablet';
+          const hsn = m.hsn_code || '';
+          const gst = parseFloat(m.gst_percent || m.gst) || 12;
+          const sch = m.schedule || '';
+          const h1 = (m.is_h1 === '1' || m.is_h1 === 'true' || String(m.is_h1).toLowerCase() === 'yes') ? 1 : 0;
+          const tps = parseInt(m.tablets_per_strip || m.strip_qty) || 10;
+
+          let medId;
+          const existing = findByName.get(name);
+          if (existing) {
+            medId = existing.id;
+            updateMedStmt.run(alias, name, gn, cn, dg, uc, hsn, gst, sch, h1, tps, medId);
+            result.updated++;
+          } else {
+            const ins = insertMedStmt.run(alias, name, gn, cn, dg, uc, hsn, gst, sch, h1, tps);
+            medId = ins.lastInsertRowid;
+            result.created++;
+          }
+
+          // Also upsert batch / stock rate / MRP / quantity
+          upsertMedicineBatchRecord(medId, m, false);
         } catch (e) { result.errors.push({ row: idx + 2, message: e.message }); }
       });
     });
     txn();
-    logAction('CSV_MEDICINE_IMPORT', 'Medicine', null, null, { created: result.created, errors: result.errors.length });
+    logAction('CSV_MEDICINE_IMPORT', 'Medicine', null, null, { created: result.created, updated: result.updated, errors: result.errors.length });
     res.json(result);
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
@@ -666,16 +895,22 @@ app.put('/api/medicines/import/csv', (req, res) => {
           const hsn = m.hsn_code || '';
           const gst = parseFloat(m.gst_percent || m.gst) || 12;
           const sch = m.schedule || '';
-          const h1 = (m.is_h1 === '1' || m.is_h1 === 'true') ? 1 : 0;
+          const h1 = (m.is_h1 === '1' || m.is_h1 === 'true' || String(m.is_h1).toLowerCase() === 'yes') ? 1 : 0;
           const tps = parseInt(m.tablets_per_strip || m.strip_qty) || 10;
 
+          let targetId;
           if (existingId) {
             updateStmt.run(alias, name, gn, cn, dg, uc, hsn, gst, sch, h1, tps, existingId);
+            targetId = existingId;
             result.updated++;
           } else {
-            insertStmt.run(alias, name, gn, cn, dg, uc, hsn, gst, sch, h1, tps);
+            const ins = insertStmt.run(alias, name, gn, cn, dg, uc, hsn, gst, sch, h1, tps);
+            targetId = ins.lastInsertRowid;
             result.created++;
           }
+
+          // Upsert batch in update mode (replaces batch quantity directly)
+          upsertMedicineBatchRecord(targetId, m, true);
         } catch (e) { result.errors.push({ row: idx + 2, message: e.message }); }
       });
     });
@@ -917,6 +1152,20 @@ app.delete('/api/customers/:id', (req, res) => {
 const CUST_CSV_COLS = ['id','name','phone','address','state','credit_balance','last_payment_mode'];
 const CUST_CSV_LABELS = { id:'ID', name:'Name', phone:'Phone', address:'Address', state:'State', credit_balance:'Credit Balance', last_payment_mode:'Last Payment Mode' };
 
+const SAMPLE_CUSTOMERS = [
+  { id: '', name: 'Rahul Sharma', phone: '9876543210', address: 'Flat 402, Shanti Heights, MG Road', state: 'Maharashtra', credit_balance: 450.00, last_payment_mode: 'UPI' },
+  { id: '', name: 'Pooja Verma', phone: '9123456780', address: '12, Greenfield Colony, Sector 4', state: 'Maharashtra', credit_balance: 0.00, last_payment_mode: 'Cash' }
+];
+
+app.get('/api/customers/sample/csv', (req, res) => {
+  try {
+    const csv = toCSV(SAMPLE_CUSTOMERS, CUST_CSV_COLS, CUST_CSV_LABELS);
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', 'attachment; filename="sample_customers_template.csv"');
+    res.send(csv);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
 app.get('/api/customers/export/csv', (req, res) => {
   try {
     const rows = db.prepare('SELECT * FROM customers ORDER BY name').all().map(decryptCustomer);
@@ -1032,6 +1281,20 @@ app.delete('/api/doctors/:id', (req, res) => {
 // ── Doctor CSV Export / Import / Update ────────────────────────────────────
 const DOC_CSV_COLS = ['id','name','hospital','phone','address','specialization'];
 const DOC_CSV_LABELS = { id:'ID', name:'Name', hospital:'Hospital', phone:'Phone', address:'Address', specialization:'Specialization' };
+
+const SAMPLE_DOCTORS = [
+  { id: '', name: 'Dr. Rajesh Deshmukh', hospital: 'Apex Multi-speciality Hospital', phone: '9822012345', address: 'Near Railway Station, Shivajinagar', specialization: 'General Physician / MD Medicine' },
+  { id: '', name: 'Dr. Anjali Patil', hospital: 'Patil Children Clinic', phone: '9890123456', address: 'Main Market, Opp City Post Office', specialization: 'Pediatrician' }
+];
+
+app.get('/api/doctors/sample/csv', (req, res) => {
+  try {
+    const csv = toCSV(SAMPLE_DOCTORS, DOC_CSV_COLS, DOC_CSV_LABELS);
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', 'attachment; filename="sample_doctors_template.csv"');
+    res.send(csv);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
 
 app.get('/api/doctors/export/csv', (req, res) => {
   try {
@@ -1157,6 +1420,20 @@ app.delete('/api/suppliers/:id', (req, res) => {
 // ── Supplier CSV Export / Import / Update ──────────────────────────────────
 const SUP_CSV_COLS = ['id','name','phone','email','address','gst_number','dl_number'];
 const SUP_CSV_LABELS = { id:'ID', name:'Name', phone:'Phone', email:'Email', address:'Address', gst_number:'GST Number', dl_number:'DL Number' };
+
+const SAMPLE_SUPPLIERS = [
+  { id: '', name: 'Balaji Pharma Distributors', phone: '9850123456', email: 'orders@balajipharma.com', address: 'Shop 14, Wholesale Drug Market', gst_number: '27AABCU9603R1ZM', dl_number: 'MH-MZ2-123456' },
+  { id: '', name: 'Apollo Medical Agency', phone: '9422098765', email: 'info@apollomedagency.com', address: 'GIDC Industrial Area, Plot 55', gst_number: '27AABCA1234C1ZV', dl_number: 'MH-MZ1-654321' }
+];
+
+app.get('/api/suppliers/sample/csv', (req, res) => {
+  try {
+    const csv = toCSV(SAMPLE_SUPPLIERS, SUP_CSV_COLS, SUP_CSV_LABELS);
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', 'attachment; filename="sample_suppliers_template.csv"');
+    res.send(csv);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
 
 app.get('/api/suppliers/export/csv', (req, res) => {
   try {

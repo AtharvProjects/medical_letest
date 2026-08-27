@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { api } from '../services/api';
 import { useToast } from '../App';
-import { Plus, Edit2, Trash2, Truck, Upload, Download, RefreshCw } from 'lucide-react';
+import { Plus, Edit2, Trash2, Truck, Upload, Download, RefreshCw, FileSpreadsheet } from 'lucide-react';
 import { downloadCSV, readFileAsText, exportFilename } from '../utils/csv';
 import ImportResultModal from '../components/ImportResultModal';
 import {
@@ -102,6 +102,14 @@ export default function Suppliers() {
   };
 
   /* ----------------------------- CSV handlers ------------------------------ */
+  const handleDownloadSample = async () => {
+    try {
+      const csv = await api.getSupplierSampleCSV();
+      downloadCSV('sample_suppliers_template.csv', csv);
+      showToast('Sample template downloaded');
+    } catch (err) { showToast(err.message, 'error'); }
+  };
+
   const handleExportCSV = async () => {
     try {
       const csv = await api.exportSuppliersCSV();
@@ -183,6 +191,7 @@ export default function Suppliers() {
           <SearchInput value={search} onChange={setSearch} placeholder="Search name, phone, GST…" width={320} />
         </div>
         <div className="toolbar-right">
+          <Button variant="ghost" icon={FileSpreadsheet} onClick={handleDownloadSample} title="Download sample CSV template">Sample Template</Button>
           <Button variant="secondary" icon={Download} onClick={handleExportCSV}>Export CSV</Button>
           <Button variant="secondary" icon={Upload} onClick={() => csvImportRef.current?.click()}>Import CSV</Button>
           <Button variant="secondary" icon={RefreshCw} onClick={() => csvUpdateRef.current?.click()}>Update CSV</Button>

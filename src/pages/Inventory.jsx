@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { api } from '../services/api';
 import { useToast } from '../App';
-import { Plus, Edit2, Package, Trash2, Upload, Download, RefreshCw, Layers, AlertTriangle, PackageX, CalendarClock } from 'lucide-react';
+import { Plus, Edit2, Package, Trash2, Upload, Download, RefreshCw, FileSpreadsheet, Layers, AlertTriangle, PackageX, CalendarClock } from 'lucide-react';
 import Fuse from 'fuse.js';
 import { downloadCSV, readFileAsText, exportFilename } from '../utils/csv';
 import ImportResultModal from '../components/ImportResultModal';
@@ -123,10 +123,18 @@ export default function Inventory() {
     }
   };
 
+  const handleDownloadSample = async () => {
+    try {
+      const csv = await api.getMedicineSampleCSV();
+      downloadCSV('sample_medicines_template.csv', csv);
+      showToast('Sample template downloaded');
+    } catch (err) { showToast(err.message, 'error'); }
+  };
+
   const handleExportCSV = async () => {
     try {
       const csv = await api.exportMedicinesCSV();
-      downloadCSV(exportFilename('medicines'), csv);
+      downloadCSV(exportFilename('medicines_inventory'), csv);
       showToast('Medicines exported successfully');
     } catch (err) { showToast(err.message, 'error'); }
   };
@@ -208,6 +216,7 @@ export default function Inventory() {
           <SearchInput value={search} onChange={setSearch} placeholder="Search by name, alias, company…" width={300} />
         </div>
         <div className="toolbar-right">
+          <Button variant="ghost" icon={FileSpreadsheet} onClick={handleDownloadSample} title="Download sample CSV template with all stock & rate fields">Sample Template</Button>
           <Button variant="secondary" icon={Download} onClick={handleExportCSV}>Export CSV</Button>
           <Button variant="secondary" icon={Upload} onClick={() => importRef.current?.click()}>Import CSV</Button>
           <Button variant="secondary" icon={RefreshCw} onClick={() => updateRef.current?.click()}>Update CSV</Button>
