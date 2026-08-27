@@ -9,7 +9,7 @@
     "client": "vite",
     "build": "vite build",
     "electron:dev": "concurrently \"npm run server\" \"npm run client\" \"wait-on http://localhost:5173 && electron .\"",
-    "electron:build": "npm run build && electron-builder build --win --x64",
+    "electron:build": "node scripts/build-exe.js",
     "postinstall": "electron-builder install-app-deps",
     "seed": "node_modules/electron/dist/electron.exe scripts/run-seed.js --no-sandbox"
   },

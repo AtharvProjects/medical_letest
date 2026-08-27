@@ -10,6 +10,9 @@ export default defineConfig({
     emptyOutDir: true,
     assetsDir: 'assets',
   },
+  resolve: {
+    preserveSymlinks: true
+  },
   server: {
     port: 5173,
     strictPort: true,
