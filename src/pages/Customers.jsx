@@ -1,11 +1,13 @@
-import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { api } from '../services/api';
 import { useToast } from '../App';
 import {
   Plus, Edit2, Trash2, User, History, Printer, FileText, Send, IndianRupee,
-  Users, Wallet, AlertCircle,
+  Users, Wallet, AlertCircle, Upload, Download, RefreshCw,
 } from 'lucide-react';
 import { generateInvoicePDF, sendInvoiceViaWhatsApp } from '../services/pdf';
+import { downloadCSV, readFileAsText, exportFilename } from '../utils/csv';
+import ImportResultModal from '../components/ImportResultModal';
 import { money, formatDate } from '../utils/format';
 import { INDIAN_STATES } from '../utils/states';
 import {
@@ -49,6 +51,12 @@ export default function Customers() {
   const [historyCust, setHistoryCust] = useState(null);
   const [historyDetails, setHistoryDetails] = useState(null);
   const [sendingWhatsApp, setSendingWhatsApp] = useState(null);
+
+  // CSV
+  const [csvResult, setCsvResult] = useState(null);
+  const [csvMode, setCsvMode] = useState('import');
+  const csvImportRef = useRef(null);
+  const csvUpdateRef = useRef(null);
 
   const fetchCustomers = useCallback(() => {
     setLoading(true);
@@ -202,6 +210,41 @@ export default function Customers() {
     }
   };
 
+  /* ----------------------------- CSV handlers ------------------------------ */
+  const handleExportCSV = async () => {
+    try {
+      const csv = await api.exportCustomersCSV();
+      downloadCSV(exportFilename('customers'), csv);
+      showToast('Customers exported successfully');
+    } catch (err) { showToast(err.message, 'error'); }
+  };
+
+  const handleCSVImport = async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    e.target.value = '';
+    try {
+      const text = await readFileAsText(file);
+      const result = await api.importCustomersCSV(text);
+      setCsvMode('import');
+      setCsvResult(result);
+      fetchCustomers();
+    } catch (err) { showToast(err.message, 'error'); }
+  };
+
+  const handleCSVUpdate = async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    e.target.value = '';
+    try {
+      const text = await readFileAsText(file);
+      const result = await api.updateCustomersCSV(text);
+      setCsvMode('update');
+      setCsvResult(result);
+      fetchCustomers();
+    } catch (err) { showToast(err.message, 'error'); }
+  };
+
   /* -------------------------------- columns -------------------------------- */
   const columns = [
     {
@@ -287,7 +330,12 @@ export default function Customers() {
           <SearchInput value={search} onChange={setSearch} placeholder="Search name, phone, address…" width={280} />
         </div>
         <div className="toolbar-right">
+          <Button variant="secondary" icon={Download} onClick={handleExportCSV}>Export CSV</Button>
+          <Button variant="secondary" icon={Upload} onClick={() => csvImportRef.current?.click()}>Import CSV</Button>
+          <Button variant="secondary" icon={RefreshCw} onClick={() => csvUpdateRef.current?.click()}>Update CSV</Button>
           <Button variant="primary" icon={Plus} onClick={openNew}>New Customer</Button>
+          <input ref={csvImportRef} type="file" accept=".csv" className="hidden" onChange={handleCSVImport} />
+          <input ref={csvUpdateRef} type="file" accept=".csv" className="hidden" onChange={handleCSVUpdate} />
         </div>
       </div>
 
@@ -430,6 +478,15 @@ export default function Customers() {
             </div>
           )}
         </Modal>
+      )}
+
+      {csvResult && (
+        <ImportResultModal
+          result={csvResult}
+          entity="customers"
+          mode={csvMode}
+          onClose={() => setCsvResult(null)}
+        />
       )}
 
       {/* Delete confirm */}

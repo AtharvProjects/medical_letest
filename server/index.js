@@ -8,6 +8,7 @@ const { encrypt, decrypt } = require('./encryption');
 const { createBackup, maybeAutoBackup, listBackups, deleteBackup } = require('./backup');
 const { splitInclusive, round2, perUnitCost } = require('./money');
 const { logAction } = require('./audit');
+const { parseCSV, toCSV } = require('./csv');
 
 // Per-line COGS as a SQL expression, shared by every profit/margin query so the
 // costing stays identical everywhere. `ii`=invoice_items, `b`=batches, `m`=medicines.
@@ -19,6 +20,7 @@ const app = express();
 app.use(cors());
 app.use(express.json({ limit: '50mb' })); // Increased limit for PDF base64
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
+app.use(express.text({ limit: '50mb', type: 'text/csv' }));
 
 const { getHardwareId, verifyLicenseKey, isAppLicensed } = require('./license');
 
@@ -594,6 +596,95 @@ app.post('/api/medicines/bulk', (req, res) => {
   }
 });
 
+// ── Medicine CSV Export / Import / Update ─────────────────────────────────
+const MED_CSV_COLS = ['id','alias','brand_name','generic_name','company_name','drug_group','unit_category','hsn_code','gst_percent','schedule','is_h1','tablets_per_strip'];
+const MED_CSV_LABELS = { id:'ID', alias:'Alias', brand_name:'Brand Name', generic_name:'Generic Name', company_name:'Company', drug_group:'Drug Group', unit_category:'Unit Category', hsn_code:'HSN Code', gst_percent:'GST %', schedule:'Schedule', is_h1:'Is H1', tablets_per_strip:'Tablets Per Strip' };
+
+app.get('/api/medicines/export/csv', (req, res) => {
+  try {
+    const rows = db.prepare('SELECT * FROM medicines WHERE is_active = 1 ORDER BY brand_name').all();
+    const csv = toCSV(rows, MED_CSV_COLS, MED_CSV_LABELS);
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', 'attachment; filename="medicines_export.csv"');
+    res.send(csv);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.post('/api/medicines/import/csv', (req, res) => {
+  try {
+    const text = typeof req.body === 'string' ? req.body : JSON.stringify(req.body);
+    const { rows } = parseCSV(text);
+    if (!rows.length) return res.status(400).json({ error: 'CSV file is empty' });
+
+    const result = { created: 0, updated: 0, skipped: 0, errors: [] };
+    const stmt = db.prepare(`INSERT INTO medicines (alias, brand_name, generic_name, company_name, drug_group, unit_category, hsn_code, gst_percent, schedule, is_h1, tablets_per_strip) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+
+    const txn = db.transaction(() => {
+      rows.forEach((m, idx) => {
+        try {
+          const name = m.brand_name || m.name;
+          if (!name) { result.errors.push({ row: idx + 2, message: 'Missing brand_name' }); return; }
+          stmt.run(m.alias || '', name, m.generic_name || '', m.company_name || m.company || '', m.drug_group || m.group || '', m.unit_category || m.unit || 'Tablet', m.hsn_code || '', parseFloat(m.gst_percent || m.gst) || 12, m.schedule || '', (m.is_h1 === '1' || m.is_h1 === 'true') ? 1 : 0, parseInt(m.tablets_per_strip || m.strip_qty) || 10);
+          result.created++;
+        } catch (e) { result.errors.push({ row: idx + 2, message: e.message }); }
+      });
+    });
+    txn();
+    logAction('CSV_MEDICINE_IMPORT', 'Medicine', null, null, { created: result.created, errors: result.errors.length });
+    res.json(result);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.put('/api/medicines/import/csv', (req, res) => {
+  try {
+    const text = typeof req.body === 'string' ? req.body : JSON.stringify(req.body);
+    const { rows } = parseCSV(text);
+    if (!rows.length) return res.status(400).json({ error: 'CSV file is empty' });
+
+    const result = { created: 0, updated: 0, skipped: 0, errors: [] };
+    const updateStmt = db.prepare(`UPDATE medicines SET alias=?, brand_name=?, generic_name=?, company_name=?, drug_group=?, unit_category=?, hsn_code=?, gst_percent=?, schedule=?, is_h1=?, tablets_per_strip=?, updated_at=datetime('now','localtime') WHERE id=?`);
+    const findByName = db.prepare('SELECT id FROM medicines WHERE LOWER(brand_name) = LOWER(?) LIMIT 1');
+    const insertStmt = db.prepare(`INSERT INTO medicines (alias, brand_name, generic_name, company_name, drug_group, unit_category, hsn_code, gst_percent, schedule, is_h1, tablets_per_strip) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+
+    const txn = db.transaction(() => {
+      rows.forEach((m, idx) => {
+        try {
+          const name = m.brand_name || m.name;
+          if (!name) { result.errors.push({ row: idx + 2, message: 'Missing brand_name' }); return; }
+
+          let existingId = m.id ? parseInt(m.id) : null;
+          if (!existingId) {
+            const found = findByName.get(name);
+            if (found) existingId = found.id;
+          }
+
+          const alias = m.alias || '';
+          const gn = m.generic_name || '';
+          const cn = m.company_name || m.company || '';
+          const dg = m.drug_group || m.group || '';
+          const uc = m.unit_category || m.unit || 'Tablet';
+          const hsn = m.hsn_code || '';
+          const gst = parseFloat(m.gst_percent || m.gst) || 12;
+          const sch = m.schedule || '';
+          const h1 = (m.is_h1 === '1' || m.is_h1 === 'true') ? 1 : 0;
+          const tps = parseInt(m.tablets_per_strip || m.strip_qty) || 10;
+
+          if (existingId) {
+            updateStmt.run(alias, name, gn, cn, dg, uc, hsn, gst, sch, h1, tps, existingId);
+            result.updated++;
+          } else {
+            insertStmt.run(alias, name, gn, cn, dg, uc, hsn, gst, sch, h1, tps);
+            result.created++;
+          }
+        } catch (e) { result.errors.push({ row: idx + 2, message: e.message }); }
+      });
+    });
+    txn();
+    logAction('CSV_MEDICINE_UPDATE', 'Medicine', null, null, { created: result.created, updated: result.updated, errors: result.errors.length });
+    res.json(result);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
 app.put('/api/medicines/:id', (req, res) => {
   const { alias, brand_name, generic_name, company_name, drug_group, unit_category, hsn_code, gst_percent, schedule, is_active, is_h1, tablets_per_strip } = req.body;
   try {
@@ -822,6 +913,78 @@ app.delete('/api/customers/:id', (req, res) => {
   }
 });
 
+// ── Customer CSV Export / Import / Update ──────────────────────────────────
+const CUST_CSV_COLS = ['id','name','phone','address','state','credit_balance','last_payment_mode'];
+const CUST_CSV_LABELS = { id:'ID', name:'Name', phone:'Phone', address:'Address', state:'State', credit_balance:'Credit Balance', last_payment_mode:'Last Payment Mode' };
+
+app.get('/api/customers/export/csv', (req, res) => {
+  try {
+    const rows = db.prepare('SELECT * FROM customers ORDER BY name').all().map(decryptCustomer);
+    const csv = toCSV(rows, CUST_CSV_COLS, CUST_CSV_LABELS);
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', 'attachment; filename="customers_export.csv"');
+    res.send(csv);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.post('/api/customers/import/csv', (req, res) => {
+  try {
+    const text = typeof req.body === 'string' ? req.body : JSON.stringify(req.body);
+    const { rows } = parseCSV(text);
+    if (!rows.length) return res.status(400).json({ error: 'CSV file is empty' });
+
+    const result = { created: 0, updated: 0, skipped: 0, errors: [] };
+    const stmt = db.prepare('INSERT INTO customers (name, phone, address, state, credit_balance, last_payment_mode) VALUES (?, ?, ?, ?, ?, ?)');
+
+    const txn = db.transaction(() => {
+      rows.forEach((c, idx) => {
+        try {
+          if (!c.name) { result.errors.push({ row: idx + 2, message: 'Missing name' }); return; }
+          stmt.run(c.name, encrypt(c.phone || ''), encrypt(c.address || ''), c.state || '', parseFloat(c.credit_balance) || 0, c.last_payment_mode || 'Cash');
+          result.created++;
+        } catch (e) { result.errors.push({ row: idx + 2, message: e.message }); }
+      });
+    });
+    txn();
+    logAction('CSV_CUSTOMER_IMPORT', 'Customer', null, null, { created: result.created, errors: result.errors.length });
+    res.json(result);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.put('/api/customers/import/csv', (req, res) => {
+  try {
+    const text = typeof req.body === 'string' ? req.body : JSON.stringify(req.body);
+    const { rows } = parseCSV(text);
+    if (!rows.length) return res.status(400).json({ error: 'CSV file is empty' });
+
+    const result = { created: 0, updated: 0, skipped: 0, errors: [] };
+    const updateStmt = db.prepare(`UPDATE customers SET name=?, phone=?, address=?, state=?, credit_balance=?, last_payment_mode=?, updated_at=datetime('now','localtime') WHERE id=?`);
+    const findByName = db.prepare('SELECT id FROM customers WHERE LOWER(name) = LOWER(?) LIMIT 1');
+    const insertStmt = db.prepare('INSERT INTO customers (name, phone, address, state, credit_balance, last_payment_mode) VALUES (?, ?, ?, ?, ?, ?)');
+
+    const txn = db.transaction(() => {
+      rows.forEach((c, idx) => {
+        try {
+          if (!c.name) { result.errors.push({ row: idx + 2, message: 'Missing name' }); return; }
+          let existingId = c.id ? parseInt(c.id) : null;
+          if (!existingId) { const found = findByName.get(c.name); if (found) existingId = found.id; }
+
+          if (existingId) {
+            updateStmt.run(c.name, encrypt(c.phone || ''), encrypt(c.address || ''), c.state || '', parseFloat(c.credit_balance) || 0, c.last_payment_mode || 'Cash', existingId);
+            result.updated++;
+          } else {
+            insertStmt.run(c.name, encrypt(c.phone || ''), encrypt(c.address || ''), c.state || '', parseFloat(c.credit_balance) || 0, c.last_payment_mode || 'Cash');
+            result.created++;
+          }
+        } catch (e) { result.errors.push({ row: idx + 2, message: e.message }); }
+      });
+    });
+    txn();
+    logAction('CSV_CUSTOMER_UPDATE', 'Customer', null, null, { created: result.created, updated: result.updated, errors: result.errors.length });
+    res.json(result);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
 // ============ DOCTORS ============
 app.get('/api/doctors', (req, res) => {
   const { search } = req.query;
@@ -864,6 +1027,78 @@ app.delete('/api/doctors/:id', (req, res) => {
   } catch (err) {
     res.status(400).json({ error: err.message });
   }
+});
+
+// ── Doctor CSV Export / Import / Update ────────────────────────────────────
+const DOC_CSV_COLS = ['id','name','hospital','phone','address','specialization'];
+const DOC_CSV_LABELS = { id:'ID', name:'Name', hospital:'Hospital', phone:'Phone', address:'Address', specialization:'Specialization' };
+
+app.get('/api/doctors/export/csv', (req, res) => {
+  try {
+    const rows = db.prepare('SELECT * FROM doctors ORDER BY name').all();
+    const csv = toCSV(rows, DOC_CSV_COLS, DOC_CSV_LABELS);
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', 'attachment; filename="doctors_export.csv"');
+    res.send(csv);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.post('/api/doctors/import/csv', (req, res) => {
+  try {
+    const text = typeof req.body === 'string' ? req.body : JSON.stringify(req.body);
+    const { rows } = parseCSV(text);
+    if (!rows.length) return res.status(400).json({ error: 'CSV file is empty' });
+
+    const result = { created: 0, updated: 0, skipped: 0, errors: [] };
+    const stmt = db.prepare('INSERT INTO doctors (name, hospital, phone, address, specialization) VALUES (?, ?, ?, ?, ?)');
+
+    const txn = db.transaction(() => {
+      rows.forEach((d, idx) => {
+        try {
+          if (!d.name) { result.errors.push({ row: idx + 2, message: 'Missing name' }); return; }
+          stmt.run(d.name, d.hospital || '', d.phone || '', d.address || '', d.specialization || '');
+          result.created++;
+        } catch (e) { result.errors.push({ row: idx + 2, message: e.message }); }
+      });
+    });
+    txn();
+    logAction('CSV_DOCTOR_IMPORT', 'Doctor', null, null, { created: result.created, errors: result.errors.length });
+    res.json(result);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.put('/api/doctors/import/csv', (req, res) => {
+  try {
+    const text = typeof req.body === 'string' ? req.body : JSON.stringify(req.body);
+    const { rows } = parseCSV(text);
+    if (!rows.length) return res.status(400).json({ error: 'CSV file is empty' });
+
+    const result = { created: 0, updated: 0, skipped: 0, errors: [] };
+    const updateStmt = db.prepare('UPDATE doctors SET name=?, hospital=?, phone=?, address=?, specialization=? WHERE id=?');
+    const findByName = db.prepare('SELECT id FROM doctors WHERE LOWER(name) = LOWER(?) LIMIT 1');
+    const insertStmt = db.prepare('INSERT INTO doctors (name, hospital, phone, address, specialization) VALUES (?, ?, ?, ?, ?)');
+
+    const txn = db.transaction(() => {
+      rows.forEach((d, idx) => {
+        try {
+          if (!d.name) { result.errors.push({ row: idx + 2, message: 'Missing name' }); return; }
+          let existingId = d.id ? parseInt(d.id) : null;
+          if (!existingId) { const found = findByName.get(d.name); if (found) existingId = found.id; }
+
+          if (existingId) {
+            updateStmt.run(d.name, d.hospital || '', d.phone || '', d.address || '', d.specialization || '', existingId);
+            result.updated++;
+          } else {
+            insertStmt.run(d.name, d.hospital || '', d.phone || '', d.address || '', d.specialization || '');
+            result.created++;
+          }
+        } catch (e) { result.errors.push({ row: idx + 2, message: e.message }); }
+      });
+    });
+    txn();
+    logAction('CSV_DOCTOR_UPDATE', 'Doctor', null, null, { created: result.created, updated: result.updated, errors: result.errors.length });
+    res.json(result);
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 // ============ SUPPLIERS ============
@@ -917,6 +1152,78 @@ app.delete('/api/suppliers/:id', (req, res) => {
   } catch (err) {
     res.status(400).json({ error: err.message });
   }
+});
+
+// ── Supplier CSV Export / Import / Update ──────────────────────────────────
+const SUP_CSV_COLS = ['id','name','phone','email','address','gst_number','dl_number'];
+const SUP_CSV_LABELS = { id:'ID', name:'Name', phone:'Phone', email:'Email', address:'Address', gst_number:'GST Number', dl_number:'DL Number' };
+
+app.get('/api/suppliers/export/csv', (req, res) => {
+  try {
+    const rows = db.prepare('SELECT * FROM suppliers ORDER BY name').all();
+    const csv = toCSV(rows, SUP_CSV_COLS, SUP_CSV_LABELS);
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', 'attachment; filename="suppliers_export.csv"');
+    res.send(csv);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.post('/api/suppliers/import/csv', (req, res) => {
+  try {
+    const text = typeof req.body === 'string' ? req.body : JSON.stringify(req.body);
+    const { rows } = parseCSV(text);
+    if (!rows.length) return res.status(400).json({ error: 'CSV file is empty' });
+
+    const result = { created: 0, updated: 0, skipped: 0, errors: [] };
+    const stmt = db.prepare('INSERT INTO suppliers (name, phone, email, address, gst_number, dl_number) VALUES (?, ?, ?, ?, ?, ?)');
+
+    const txn = db.transaction(() => {
+      rows.forEach((s, idx) => {
+        try {
+          if (!s.name) { result.errors.push({ row: idx + 2, message: 'Missing name' }); return; }
+          stmt.run(s.name, s.phone || '', s.email || '', s.address || '', s.gst_number || '', s.dl_number || '');
+          result.created++;
+        } catch (e) { result.errors.push({ row: idx + 2, message: e.message }); }
+      });
+    });
+    txn();
+    logAction('CSV_SUPPLIER_IMPORT', 'Supplier', null, null, { created: result.created, errors: result.errors.length });
+    res.json(result);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.put('/api/suppliers/import/csv', (req, res) => {
+  try {
+    const text = typeof req.body === 'string' ? req.body : JSON.stringify(req.body);
+    const { rows } = parseCSV(text);
+    if (!rows.length) return res.status(400).json({ error: 'CSV file is empty' });
+
+    const result = { created: 0, updated: 0, skipped: 0, errors: [] };
+    const updateStmt = db.prepare('UPDATE suppliers SET name=?, phone=?, email=?, address=?, gst_number=?, dl_number=? WHERE id=?');
+    const findByName = db.prepare('SELECT id FROM suppliers WHERE LOWER(name) = LOWER(?) LIMIT 1');
+    const insertStmt = db.prepare('INSERT INTO suppliers (name, phone, email, address, gst_number, dl_number) VALUES (?, ?, ?, ?, ?, ?)');
+
+    const txn = db.transaction(() => {
+      rows.forEach((s, idx) => {
+        try {
+          if (!s.name) { result.errors.push({ row: idx + 2, message: 'Missing name' }); return; }
+          let existingId = s.id ? parseInt(s.id) : null;
+          if (!existingId) { const found = findByName.get(s.name); if (found) existingId = found.id; }
+
+          if (existingId) {
+            updateStmt.run(s.name, s.phone || '', s.email || '', s.address || '', s.gst_number || '', s.dl_number || '', existingId);
+            result.updated++;
+          } else {
+            insertStmt.run(s.name, s.phone || '', s.email || '', s.address || '', s.gst_number || '', s.dl_number || '');
+            result.created++;
+          }
+        } catch (e) { result.errors.push({ row: idx + 2, message: e.message }); }
+      });
+    });
+    txn();
+    logAction('CSV_SUPPLIER_UPDATE', 'Supplier', null, null, { created: result.created, updated: result.updated, errors: result.errors.length });
+    res.json(result);
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 // ============ INVOICES / BILLING ============

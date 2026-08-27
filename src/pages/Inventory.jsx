@@ -1,8 +1,10 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { api } from '../services/api';
 import { useToast } from '../App';
-import { Plus, Edit2, Package, Trash2, Upload, Layers, AlertTriangle, PackageX, CalendarClock } from 'lucide-react';
+import { Plus, Edit2, Package, Trash2, Upload, Download, RefreshCw, Layers, AlertTriangle, PackageX, CalendarClock } from 'lucide-react';
 import Fuse from 'fuse.js';
+import { downloadCSV, readFileAsText, exportFilename } from '../utils/csv';
+import ImportResultModal from '../components/ImportResultModal';
 import {
   Button,
   Modal,
@@ -49,8 +51,11 @@ export default function Inventory() {
   const [batchMedicine, setBatchMedicine] = useState(null);
   const [confirmDeleteMed, setConfirmDeleteMed] = useState(null);
   const [deleting, setDeleting] = useState(false);
+  const [csvResult, setCsvResult] = useState(null);
+  const [csvMode, setCsvMode] = useState('import');
 
-  const fileRef = useRef(null);
+  const importRef = useRef(null);
+  const updateRef = useRef(null);
   const showToast = useToast();
 
   const load = useCallback(() => {
@@ -118,44 +123,38 @@ export default function Inventory() {
     }
   };
 
+  const handleExportCSV = async () => {
+    try {
+      const csv = await api.exportMedicinesCSV();
+      downloadCSV(exportFilename('medicines'), csv);
+      showToast('Medicines exported successfully');
+    } catch (err) { showToast(err.message, 'error'); }
+  };
+
   const handleCSVImport = async (e) => {
     const file = e.target.files[0];
     if (!file) return;
-    const reader = new FileReader();
-    reader.onload = async (event) => {
-      try {
-        const text = event.target.result;
-        const rows = text.split('\n').filter((r) => r.trim());
-        const headers = rows[0].split(',').map((h) => h.trim().toLowerCase().replace(/ /g, '_'));
-        const meds = rows.slice(1)
-          .map((row) => {
-            const values = row.split(',').map((v) => v.trim());
-            const obj = {};
-            headers.forEach((h, i) => (obj[h] = values[i]));
-            return {
-              brand_name: obj.brand_name || obj.name,
-              alias: obj.alias || '',
-              generic_name: obj.generic_name || '',
-              company_name: obj.company_name || obj.company || '',
-              drug_group: obj.drug_group || obj.group || '',
-              unit_category: obj.unit_category || obj.unit || 'Tablet',
-              gst_percent: parseInt(obj.gst_percent || obj.gst) || 12,
-              hsn_code: obj.hsn_code || '',
-              tablets_per_strip: parseInt(obj.tablets_per_strip || obj.strip_qty) || 10,
-              is_h1: obj.is_h1 === '1' || obj.is_h1 === 'true' ? 1 : 0,
-            };
-          })
-          .filter((m) => m.brand_name);
-        if (meds.length === 0) throw new Error('No valid medicines found in CSV');
-        await api.post('/medicines/bulk', { medicines: meds });
-        showToast(`Imported ${meds.length} medicines successfully`);
-        load();
-      } catch (err) {
-        showToast(err.message, 'error');
-      }
-    };
-    reader.readAsText(file);
     e.target.value = '';
+    try {
+      const text = await readFileAsText(file);
+      const result = await api.importMedicinesCSV(text);
+      setCsvMode('import');
+      setCsvResult(result);
+      load();
+    } catch (err) { showToast(err.message, 'error'); }
+  };
+
+  const handleCSVUpdate = async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    e.target.value = '';
+    try {
+      const text = await readFileAsText(file);
+      const result = await api.updateMedicinesCSV(text);
+      setCsvMode('update');
+      setCsvResult(result);
+      load();
+    } catch (err) { showToast(err.message, 'error'); }
   };
 
   const columns = [
@@ -209,9 +208,12 @@ export default function Inventory() {
           <SearchInput value={search} onChange={setSearch} placeholder="Search by name, alias, company…" width={300} />
         </div>
         <div className="toolbar-right">
-          <Button variant="secondary" icon={Upload} onClick={() => fileRef.current?.click()}>Import CSV</Button>
+          <Button variant="secondary" icon={Download} onClick={handleExportCSV}>Export CSV</Button>
+          <Button variant="secondary" icon={Upload} onClick={() => importRef.current?.click()}>Import CSV</Button>
+          <Button variant="secondary" icon={RefreshCw} onClick={() => updateRef.current?.click()}>Update CSV</Button>
           <Button variant="primary" icon={Plus} onClick={openAdd}>Add Medicine</Button>
-          <input ref={fileRef} type="file" accept=".csv" className="hidden" onChange={handleCSVImport} />
+          <input ref={importRef} type="file" accept=".csv" className="hidden" onChange={handleCSVImport} />
+          <input ref={updateRef} type="file" accept=".csv" className="hidden" onChange={handleCSVUpdate} />
         </div>
       </div>
 
@@ -248,6 +250,15 @@ export default function Inventory() {
 
       {batchMedicine && (
         <BatchPanel medicine={batchMedicine} lowThreshold={lowThreshold} alertDays={alertDays} onClose={() => setBatchMedicine(null)} onUpdate={load} />
+      )}
+
+      {csvResult && (
+        <ImportResultModal
+          result={csvResult}
+          entity="medicines"
+          mode={csvMode}
+          onClose={() => { setCsvResult(null); }}
+        />
       )}
 
       {confirmDeleteMed && (

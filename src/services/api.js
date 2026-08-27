@@ -133,4 +133,60 @@ export const api = {
   post: (url, data) => request(url, { method: 'POST', body: JSON.stringify(data) }),
   put: (url, data) => request(url, { method: 'PUT', body: JSON.stringify(data) }),
   delete: (url) => request(url, { method: 'DELETE' }),
+
+  // ── CSV Import / Export / Update ──────────────────────────────────────
+
+  // Medicines
+  exportMedicinesCSV: () => fetchCSVText('/medicines/export/csv'),
+  importMedicinesCSV: (text) => postCSVText('/medicines/import/csv', text),
+  updateMedicinesCSV: (text) => putCSVText('/medicines/import/csv', text),
+
+  // Customers
+  exportCustomersCSV: () => fetchCSVText('/customers/export/csv'),
+  importCustomersCSV: (text) => postCSVText('/customers/import/csv', text),
+  updateCustomersCSV: (text) => putCSVText('/customers/import/csv', text),
+
+  // Doctors
+  exportDoctorsCSV: () => fetchCSVText('/doctors/export/csv'),
+  importDoctorsCSV: (text) => postCSVText('/doctors/import/csv', text),
+  updateDoctorsCSV: (text) => putCSVText('/doctors/import/csv', text),
+
+  // Suppliers
+  exportSuppliersCSV: () => fetchCSVText('/suppliers/export/csv'),
+  importSuppliersCSV: (text) => postCSVText('/suppliers/import/csv', text),
+  updateSuppliersCSV: (text) => putCSVText('/suppliers/import/csv', text),
 };
+
+// ── CSV helpers (text/csv content type) ─────────────────────────────────
+
+async function fetchCSVText(path) {
+  const res = await fetch(`${API}${path}`);
+  if (!res.ok) {
+    const err = await res.text();
+    throw new Error(err || 'Export failed');
+  }
+  return res.text();
+}
+
+async function postCSVText(path, text) {
+  const res = await fetch(`${API}${path}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'text/csv' },
+    body: text,
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || 'Import failed');
+  return data;
+}
+
+async function putCSVText(path, text) {
+  const res = await fetch(`${API}${path}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'text/csv' },
+    body: text,
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || 'Update failed');
+  return data;
+}
+

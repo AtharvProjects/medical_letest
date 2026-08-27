@@ -1,7 +1,9 @@
-import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { api } from '../services/api';
 import { useToast } from '../App';
-import { Plus, Edit2, Trash2, Stethoscope } from 'lucide-react';
+import { Plus, Edit2, Trash2, Stethoscope, Upload, Download, RefreshCw } from 'lucide-react';
+import { downloadCSV, readFileAsText, exportFilename } from '../utils/csv';
+import ImportResultModal from '../components/ImportResultModal';
 import {
   Button, Modal, ConfirmDialog, DataTable, SearchInput, EmptyState,
   FormField, Input, Textarea,
@@ -22,6 +24,12 @@ export default function Doctors() {
 
   const [confirmTarget, setConfirmTarget] = useState(null);
   const [deleting, setDeleting] = useState(false);
+
+  // CSV
+  const [csvResult, setCsvResult] = useState(null);
+  const [csvMode, setCsvMode] = useState('import');
+  const csvImportRef = useRef(null);
+  const csvUpdateRef = useRef(null);
 
   const fetchDoctors = useCallback(() => {
     setLoading(true);
@@ -92,6 +100,41 @@ export default function Doctors() {
     }
   };
 
+  /* ----------------------------- CSV handlers ------------------------------ */
+  const handleExportCSV = async () => {
+    try {
+      const csv = await api.exportDoctorsCSV();
+      downloadCSV(exportFilename('doctors'), csv);
+      showToast('Doctors exported successfully');
+    } catch (err) { showToast(err.message, 'error'); }
+  };
+
+  const handleCSVImport = async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    e.target.value = '';
+    try {
+      const text = await readFileAsText(file);
+      const result = await api.importDoctorsCSV(text);
+      setCsvMode('import');
+      setCsvResult(result);
+      fetchDoctors();
+    } catch (err) { showToast(err.message, 'error'); }
+  };
+
+  const handleCSVUpdate = async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    e.target.value = '';
+    try {
+      const text = await readFileAsText(file);
+      const result = await api.updateDoctorsCSV(text);
+      setCsvMode('update');
+      setCsvResult(result);
+      fetchDoctors();
+    } catch (err) { showToast(err.message, 'error'); }
+  };
+
   const columns = [
     {
       header: 'Name',
@@ -125,7 +168,12 @@ export default function Doctors() {
           <SearchInput value={search} onChange={setSearch} placeholder="Search name, hospital, specialization…" width={320} />
         </div>
         <div className="toolbar-right">
+          <Button variant="secondary" icon={Download} onClick={handleExportCSV}>Export CSV</Button>
+          <Button variant="secondary" icon={Upload} onClick={() => csvImportRef.current?.click()}>Import CSV</Button>
+          <Button variant="secondary" icon={RefreshCw} onClick={() => csvUpdateRef.current?.click()}>Update CSV</Button>
           <Button variant="primary" icon={Plus} onClick={openNew}>New Doctor</Button>
+          <input ref={csvImportRef} type="file" accept=".csv" className="hidden" onChange={handleCSVImport} />
+          <input ref={csvUpdateRef} type="file" accept=".csv" className="hidden" onChange={handleCSVUpdate} />
         </div>
       </div>
 
@@ -175,6 +223,15 @@ export default function Doctors() {
             <Textarea rows={2} value={formData.address} onChange={(e) => setFormData({ ...formData, address: e.target.value })} />
           </FormField>
         </Modal>
+      )}
+
+      {csvResult && (
+        <ImportResultModal
+          result={csvResult}
+          entity="doctors"
+          mode={csvMode}
+          onClose={() => setCsvResult(null)}
+        />
       )}
 
       {confirmTarget && (
