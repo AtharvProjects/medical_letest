@@ -1,10 +1,30 @@
+// ============================================================================
+// Money math — GST-INCLUSIVE model. MUST stay identical to `server/money.js`
+// (that file is CommonJS, this is an ESM bundle, so they are intentionally
+// mirrored rather than shared-imported). If you change the math here, change it
+// there too, or on-screen totals and saved totals will disagree.
+// ============================================================================
+
+// Round to 2 decimals (currency). Guards against NaN/undefined.
+export const round2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
+
+// Inclusive amount the customer pays for one line (unitPrice is tax-inclusive).
 export const calculateLineTotal = (quantity, unitPrice, discountPercent) => {
-  return quantity * unitPrice * (1 - (discountPercent || 0) / 100);
+  return (Number(quantity) || 0) * (Number(unitPrice) || 0) * (1 - (Number(discountPercent) || 0) / 100);
 };
 
+// Split an inclusive amount into { taxable, gst }. Mirrors server splitInclusive.
+export const splitInclusive = (grossAmount, gstPercent) => {
+  const g = Number(grossAmount) || 0;
+  const pct = Number(gstPercent) || 0;
+  if (pct <= 0) return { taxable: round2(g), gst: 0 };
+  const taxable = g / (1 + pct / 100);
+  return { taxable: round2(taxable), gst: round2(g - taxable) };
+};
+
+// GST CONTAINED in an already-inclusive amount (NOT added on top).
 export const calculateGstFromTotal = (total, gstPercent) => {
-  if (!gstPercent) return 0;
-  return (total * gstPercent) / 100;
+  return splitInclusive(total, gstPercent).gst;
 };
 
 export const formatCurrency = (amount) => {

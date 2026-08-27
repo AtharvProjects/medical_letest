@@ -70,6 +70,7 @@ db.exec(`
     name TEXT NOT NULL,
     phone TEXT DEFAULT '',
     address TEXT DEFAULT '',
+    state TEXT DEFAULT '',
     credit_balance REAL DEFAULT 0,
     last_payment_mode TEXT DEFAULT 'Cash',
     created_at TEXT DEFAULT (datetime('now','localtime')),
@@ -98,6 +99,7 @@ db.exec(`
     payment_mode TEXT DEFAULT 'Cash',
     amount_paid REAL DEFAULT 0,
     credit_amount REAL DEFAULT 0,
+    is_interstate INTEGER DEFAULT 0,
     notes TEXT DEFAULT '',
     created_at TEXT DEFAULT (datetime('now','localtime')),
     FOREIGN KEY (customer_id) REFERENCES customers(id),
@@ -203,6 +205,17 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_backups_created ON backups(created_at);
 `);
 
+// ---- Lightweight, idempotent migrations for databases created before a column existed.
+// (CREATE TABLE IF NOT EXISTS never alters an existing table, so we add missing columns here.)
+function ensureColumn(table, column, ddl) {
+  const cols = db.prepare(`PRAGMA table_info(${table})`).all();
+  if (!cols.some((c) => c.name === column)) {
+    db.exec(`ALTER TABLE ${table} ADD COLUMN ${ddl}`);
+  }
+}
+ensureColumn('customers', 'state', "state TEXT DEFAULT ''");
+ensureColumn('invoices', 'is_interstate', 'is_interstate INTEGER DEFAULT 0');
+
 // Insert default settings if not exist
 const insertSetting = db.prepare('INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)');
 const defaults = {
@@ -211,6 +224,7 @@ const defaults = {
   shop_phone: '',
   shop_gst: '',
   shop_dl: '',
+  shop_state: '',
   low_stock_threshold: '10',
   expiry_alert_days: '90'
 };

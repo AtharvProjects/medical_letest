@@ -1,219 +1,211 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import { api } from '../services/api';
-import { Search, Plus, Edit, Phone, Truck, FileText, Trash2, X } from 'lucide-react';
+import { useToast } from '../App';
+import { Plus, Edit2, Trash2, Truck } from 'lucide-react';
+import {
+  Button, Modal, ConfirmDialog, DataTable, SearchInput, EmptyState,
+  FormField, Input, Textarea,
+} from '../components/ui';
+
+const EMPTY = { name: '', phone: '', email: '', address: '', gst_number: '', dl_number: '' };
 
 export default function Suppliers() {
+  const showToast = useToast();
   const [suppliers, setSuppliers] = useState([]);
-  const [search, setSearch] = useState('');
   const [loading, setLoading] = useState(true);
+  const [search, setSearch] = useState('');
+
   const [showModal, setShowModal] = useState(false);
   const [editing, setEditing] = useState(null);
-  const [formData, setFormData] = useState({ name: '', phone: '', email: '', address: '', gst_number: '', dl_number: '' });
+  const [formData, setFormData] = useState(EMPTY);
+  const [saving, setSaving] = useState(false);
 
-  const fetchSuppliers = async () => {
-    try {
-      setLoading(true);
-      const data = await api.get('/suppliers', { search });
-      setSuppliers(data);
-    } catch (err) {
-      console.error(err);
-    } finally {
-      setLoading(false);
-    }
-  };
+  const [confirmTarget, setConfirmTarget] = useState(null);
+  const [deleting, setDeleting] = useState(false);
 
-  useEffect(() => {
-    fetchSuppliers();
-  }, [search]);
+  const fetchSuppliers = useCallback(() => {
+    setLoading(true);
+    api.get('/suppliers')
+      .then(setSuppliers)
+      .catch(() => showToast('Failed to load suppliers', 'error'))
+      .finally(() => setLoading(false));
+  }, [showToast]);
 
-  const handleSubmit = async (e) => {
-    e.preventDefault();
-    try {
-      if (editing) {
-        await api.put(`/suppliers/${editing.id}`, formData);
-      } else {
-        await api.post('/suppliers', formData);
-      }
-      setShowModal(false);
-      setEditing(null);
-      setFormData({ name: '', phone: '', email: '', address: '', gst_number: '', dl_number: '' });
-      fetchSuppliers();
-    } catch (err) {
-      alert(err.message);
-    }
-  };
+  useEffect(() => { fetchSuppliers(); }, [fetchSuppliers]);
 
-  const handleEdit = (sup) => {
-    setEditing(sup);
-    setFormData({ 
-      name: sup.name, 
-      phone: sup.phone, 
-      email: sup.email, 
-      address: sup.address, 
-      gst_number: sup.gst_number,
-      dl_number: sup.dl_number
+  const filtered = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    if (!q) return suppliers;
+    return suppliers.filter(
+      (s) =>
+        (s.name || '').toLowerCase().includes(q) ||
+        (s.phone || '').toLowerCase().includes(q) ||
+        (s.gst_number || '').toLowerCase().includes(q) ||
+        (s.email || '').toLowerCase().includes(q)
+    );
+  }, [suppliers, search]);
+
+  const openNew = () => { setEditing(null); setFormData(EMPTY); setShowModal(true); };
+  const openEdit = (s) => {
+    setEditing(s);
+    setFormData({
+      name: s.name || '',
+      phone: s.phone || '',
+      email: s.email || '',
+      address: s.address || '',
+      gst_number: s.gst_number || '',
+      dl_number: s.dl_number || '',
     });
     setShowModal(true);
   };
 
-  const handleDelete = async (id) => {
-    if (!window.confirm('Are you sure you want to delete this supplier?')) return;
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    if (!formData.name.trim()) return showToast('Supplier name is required', 'error');
+    setSaving(true);
     try {
-      await api.delete(`/suppliers/${id}`);
+      if (editing) await api.put(`/suppliers/${editing.id}`, formData);
+      else await api.post('/suppliers', formData);
+      showToast(editing ? 'Supplier updated' : 'Supplier added');
+      setShowModal(false);
+      setEditing(null);
+      setFormData(EMPTY);
       fetchSuppliers();
     } catch (err) {
-      alert(err.message);
+      showToast(err.message, 'error');
+    } finally {
+      setSaving(false);
     }
   };
+
+  const handleDelete = async () => {
+    if (!confirmTarget) return;
+    setDeleting(true);
+    try {
+      await api.delete(`/suppliers/${confirmTarget.id}`);
+      showToast('Supplier deleted');
+      setConfirmTarget(null);
+      fetchSuppliers();
+    } catch (err) {
+      showToast(err.message, 'error');
+    } finally {
+      setDeleting(false);
+    }
+  };
+
+  const columns = [
+    {
+      header: 'Name',
+      render: (s) => (
+        <div className="flex items-center gap-2">
+          <Truck size={16} className="text-muted" />
+          <div>
+            <div style={{ fontWeight: 500 }}>{s.name}</div>
+            {s.email && <div className="text-muted text-xs">{s.email}</div>}
+          </div>
+        </div>
+      ),
+    },
+    { header: 'Phone', render: (s) => s.phone || <span className="text-muted">—</span> },
+    {
+      header: 'GST / DL',
+      render: (s) =>
+        s.gst_number || s.dl_number ? (
+          <div className="flex flex-col gap-1" style={{ fontSize: 11 }}>
+            {s.gst_number && <span>GST: {s.gst_number}</span>}
+            {s.dl_number && <span>DL: {s.dl_number}</span>}
+          </div>
+        ) : (
+          <span className="text-muted">—</span>
+        ),
+    },
+    { header: 'Address', render: (s) => s.address || <span className="text-muted">—</span> },
+    {
+      header: '',
+      align: 'right',
+      width: 110,
+      render: (s) => (
+        <div className="flex gap-2" style={{ justifyContent: 'flex-end' }}>
+          <Button variant="ghost" size="sm" icon={Edit2} onClick={() => openEdit(s)} title="Edit supplier" />
+          <Button variant="ghost" size="sm" icon={Trash2} onClick={() => setConfirmTarget(s)} title="Delete supplier" />
+        </div>
+      ),
+    },
+  ];
 
   return (
     <div>
       <div className="toolbar">
         <div className="toolbar-left">
-          <h2 className="section-title">Suppliers</h2>
-          <div className="search-box">
-            <Search />
-            <input 
-              type="text" 
-              placeholder="Search suppliers..." 
-              className="form-input"
-              value={search}
-              onChange={e => setSearch(e.target.value)}
-            />
-          </div>
+          <SearchInput value={search} onChange={setSearch} placeholder="Search name, phone, GST…" width={320} />
         </div>
         <div className="toolbar-right">
-          <button className="btn btn-primary" onClick={() => { setEditing(null); setFormData({ name: '', phone: '', email: '', address: '', gst_number: '', dl_number: '' }); setShowModal(true); }}>
-            <Plus size={16} /> New Supplier
-          </button>
+          <Button variant="primary" icon={Plus} onClick={openNew}>New Supplier</Button>
         </div>
       </div>
 
       <div className="glass-card" style={{ padding: 0, overflow: 'hidden' }}>
-        <table className="data-table">
-          <thead>
-            <tr>
-              <th>Name</th>
-              <th>Phone</th>
-              <th>GST / DL</th>
-              <th>Address</th>
-              <th>Actions</th>
-            </tr>
-          </thead>
-          <tbody>
-            {loading ? (
-              <tr><td colSpan="5" className="text-center">Loading...</td></tr>
-            ) : suppliers.length === 0 ? (
-              <tr><td colSpan="5" className="text-center">No suppliers found</td></tr>
-            ) : (
-              suppliers.map(s => (
-                <tr key={s.id}>
-                  <td>
-                    <div className="flex items-center gap-2">
-                      <Truck size={16} className="text-muted" />
-                      <span style={{ fontWeight: 500 }}>{s.name}</span>
-                    </div>
-                  </td>
-                  <td>{s.phone}</td>
-                  <td>
-                    <div className="flex flex-col gap-1" style={{fontSize: '11px'}}>
-                      {s.gst_number && <span>GST: {s.gst_number}</span>}
-                      {s.dl_number && <span>DL: {s.dl_number}</span>}
-                    </div>
-                  </td>
-                  <td>{s.address}</td>
-                  <td>
-                    <div className="flex gap-2">
-                      <button className="btn btn-secondary btn-sm" onClick={() => handleEdit(s)}>
-                        <Edit size={14} />
-                      </button>
-                      <button className="btn btn-danger btn-sm" onClick={() => handleDelete(s.id)}>
-                        <Trash2 size={14} />
-                      </button>
-                    </div>
-                  </td>
-                </tr>
-              ))
-            )}
-          </tbody>
-        </table>
+        <DataTable
+          loading={loading}
+          columns={columns}
+          rows={filtered}
+          empty={
+            <EmptyState
+              icon={Truck}
+              title="No suppliers found"
+              message={search ? 'No suppliers match your search.' : 'Add the distributors you buy stock from to track purchases and payments.'}
+              action={!search && <Button icon={Plus} onClick={openNew}>New Supplier</Button>}
+            />
+          }
+        />
       </div>
 
       {showModal && (
-        <div className="modal-overlay">
-          <div className="modal">
-            <div className="modal-header">
-              <h2>{editing ? 'Edit Supplier' : 'Add Supplier'}</h2>
-              <button className="modal-close" onClick={() => setShowModal(false)}><X /></button>
-            </div>
-            <form onSubmit={handleSubmit}>
-              <div className="modal-body">
-                <div className="form-group">
-                  <label className="form-label">Supplier Name *</label>
-                  <input 
-                    type="text" 
-                    required 
-                    className="form-input" 
-                    value={formData.name}
-                    onChange={e => setFormData({...formData, name: e.target.value})}
-                  />
-                </div>
-                <div className="form-row">
-                  <div className="form-group">
-                    <label className="form-label">Phone Number</label>
-                    <input 
-                      type="text" 
-                      className="form-input" 
-                      value={formData.phone}
-                      onChange={e => setFormData({...formData, phone: e.target.value})}
-                    />
-                  </div>
-                  <div className="form-group">
-                    <label className="form-label">Email</label>
-                    <input 
-                      type="email" 
-                      className="form-input" 
-                      value={formData.email}
-                      onChange={e => setFormData({...formData, email: e.target.value})}
-                    />
-                  </div>
-                </div>
-                <div className="form-row">
-                  <div className="form-group">
-                    <label className="form-label">GST Number</label>
-                    <input 
-                      type="text" 
-                      className="form-input" 
-                      value={formData.gst_number}
-                      onChange={e => setFormData({...formData, gst_number: e.target.value})}
-                    />
-                  </div>
-                  <div className="form-group">
-                    <label className="form-label">Drug License No.</label>
-                    <input 
-                      type="text" 
-                      className="form-input" 
-                      value={formData.dl_number}
-                      onChange={e => setFormData({...formData, dl_number: e.target.value})}
-                    />
-                  </div>
-                </div>
-                <div className="form-group">
-                  <label className="form-label">Address</label>
-                  <textarea 
-                    className="form-textarea" 
-                    value={formData.address}
-                    onChange={e => setFormData({...formData, address: e.target.value})}
-                  />
-                </div>
-              </div>
-              <div className="modal-footer">
-                <button type="button" className="btn btn-secondary" onClick={() => setShowModal(false)}>Cancel</button>
-                <button type="submit" className="btn btn-primary">Save Supplier</button>
-              </div>
-            </form>
+        <Modal
+          title={editing ? 'Edit Supplier' : 'Add Supplier'}
+          onClose={() => setShowModal(false)}
+          onSubmit={handleSubmit}
+          footer={
+            <>
+              <Button variant="secondary" onClick={() => setShowModal(false)}>Cancel</Button>
+              <Button type="submit" variant="primary" loading={saving}>{editing ? 'Save Changes' : 'Save Supplier'}</Button>
+            </>
+          }
+        >
+          <FormField label="Supplier Name" required>
+            <Input autoFocus value={formData.name} onChange={(e) => setFormData({ ...formData, name: e.target.value })} />
+          </FormField>
+          <div className="form-row">
+            <FormField label="Phone Number">
+              <Input value={formData.phone} onChange={(e) => setFormData({ ...formData, phone: e.target.value })} />
+            </FormField>
+            <FormField label="Email">
+              <Input type="email" value={formData.email} onChange={(e) => setFormData({ ...formData, email: e.target.value })} />
+            </FormField>
           </div>
-        </div>
+          <div className="form-row">
+            <FormField label="GST Number">
+              <Input value={formData.gst_number} onChange={(e) => setFormData({ ...formData, gst_number: e.target.value })} />
+            </FormField>
+            <FormField label="Drug License No.">
+              <Input value={formData.dl_number} onChange={(e) => setFormData({ ...formData, dl_number: e.target.value })} />
+            </FormField>
+          </div>
+          <FormField label="Address">
+            <Textarea rows={2} value={formData.address} onChange={(e) => setFormData({ ...formData, address: e.target.value })} />
+          </FormField>
+        </Modal>
+      )}
+
+      {confirmTarget && (
+        <ConfirmDialog
+          title="Delete supplier?"
+          message={`Delete "${confirmTarget.name}"? This cannot be undone. Suppliers linked to purchases or batches cannot be deleted.`}
+          confirmLabel="Delete"
+          loading={deleting}
+          onConfirm={handleDelete}
+          onClose={() => setConfirmTarget(null)}
+        />
       )}
     </div>
   );

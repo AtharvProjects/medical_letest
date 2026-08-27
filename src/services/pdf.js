@@ -97,7 +97,7 @@ export function generateInvoicePDF(invoice, settings, action = 'save') {
 
   autoTable(doc, {
     startY: y,
-    head: [['S.N.', 'Medicine Description', 'HSN', 'Batch', 'Mfg.', 'Exp.', 'Qty', 'MRP', 'GST', 'Disc', 'Amount']],
+    head: [['S.N.', 'Medicine Description', 'HSN', 'Batch', 'Mfg.', 'Exp.', 'Qty', 'Rate', 'GST', 'Disc', 'Amount']],
     body: tableRows,
     theme: 'grid',
     headStyles: { 
@@ -165,10 +165,15 @@ export function generateInvoicePDF(invoice, settings, action = 'save') {
   }
   
   if (invoice.gst_amount > 0) {
-    // Breakdown GST into CGST and SGST (usually 50-50 for local)
-    const halfGst = (invoice.gst_amount / 2).toFixed(2);
-    drawRow('CGST', halfGst);
-    drawRow('SGST', halfGst);
+    if (invoice.is_interstate) {
+      // Inter-state supply: a single IGST line for the full tax.
+      drawRow('IGST', (invoice.gst_amount || 0).toFixed(2));
+    } else {
+      // Intra-state supply: tax splits equally into CGST and SGST.
+      const halfGst = (invoice.gst_amount / 2).toFixed(2);
+      drawRow('CGST', halfGst);
+      drawRow('SGST', halfGst);
+    }
   }
   
   y += 2;

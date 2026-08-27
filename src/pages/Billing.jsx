@@ -1,203 +1,207 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { api } from '../services/api';
 import { useToast } from '../App';
-import { Search, Plus, Trash2, Printer, FileText, Send, X, UserPlus, Stethoscope, RefreshCw } from 'lucide-react';
+import {
+  Search, Trash2, Printer, FileText, Send, X, UserPlus, Stethoscope,
+  CheckCircle2, ShoppingCart,
+} from 'lucide-react';
 import { generateInvoicePDF, sendInvoiceViaWhatsApp } from '../services/pdf';
-import { calculateLineTotal, calculateGstFromTotal } from '../utils/billing';
+import { calculateLineTotal, splitInclusive, round2 } from '../utils/billing';
+import { money, todayStr } from '../utils/format';
 import Fuse from 'fuse.js';
+import { Modal, Button, FormField, Input, Badge } from '../components/ui';
+
+const TABLET_LIKE = ['Tablet', 'Capsule', 'Strip'];
+const PAYMENT_MODES = ['Cash', 'UPI', 'Pending'];
 
 const INITIAL_SESSION = {
-    items: [],
-    medSearch: '',
-    selectedCustomer: null,
-    custSearch: '',
-    selectedDoctor: null,
-    docSearch: '',
-    paymentMode: 'Cash',
-    discount: 0,
-    billSaved: false,
-    lastInvoice: null,
-    reviewTimer: 0,
-    h1Details: { patient_name: '', patient_address: '', doctor_name: '', doctor_address: '', doctor_reg_no: '', prescription_no: '' },
-    isGstEnabled: true,
+  items: [],
+  medSearch: '',
+  selectedCustomer: null,
+  custSearch: '',
+  selectedDoctor: null,
+  docSearch: '',
+  paymentMode: 'Cash',
+  discount: 0,
+  billSaved: false,
+  lastInvoice: null,
+  reviewTimer: 0,
+  h1Details: { patient_name: '', patient_address: '', doctor_name: '', doctor_address: '', doctor_reg_no: '', prescription_no: '' },
+  isGstEnabled: true,
+};
+
+// Per-unit (per-tablet) price. Rates are stored per strip; for tablet-like
+// categories we divide by tablets_per_strip. Mirrors server/money.js.
+const effectiveUnitPrice = (item) => {
+  const tps = item.tablets_per_strip || 10;
+  return TABLET_LIKE.includes(item.unit_category) ? (item.unit_price / tps) : item.unit_price;
 };
 
 export default function Billing() {
-    const [medicines, setMedicines] = useState([]);
-    const [customers, setCustomers] = useState([]);
-    const [doctors, setDoctors] = useState([]);
-    const [settings, setSettings] = useState({});
-    
-    // Multi-session state
-    // Multi-session state with persistence
-    const [sessions, setSessions] = useState(() => {
-        const saved = localStorage.getItem('billing_sessions');
-        if (saved) {
-            try {
-                const parsed = JSON.parse(saved);
-                // Ensure we have exactly 7 sessions and they have the correct structure
-                if (Array.isArray(parsed) && parsed.length === 7) {
-                    return parsed.map(s => ({ ...INITIAL_SESSION, ...s }));
-                }
-            } catch (e) { console.error('Failed to load billing sessions', e); }
+  const [medicines, setMedicines] = useState([]);
+  const [customers, setCustomers] = useState([]);
+  const [doctors, setDoctors] = useState([]);
+  const [settings, setSettings] = useState({});
+
+  // Multi-counter state, persisted so an interrupted sale survives a reload.
+  const [sessions, setSessions] = useState(() => {
+    const saved = localStorage.getItem('billing_sessions');
+    if (saved) {
+      try {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed) && parsed.length === 7) {
+          return parsed.map((s) => ({ ...INITIAL_SESSION, ...s }));
         }
-        return Array(7).fill(null).map(() => ({ ...INITIAL_SESSION }));
+      } catch (e) { console.error('Failed to load billing sessions', e); }
+    }
+    return Array(7).fill(null).map(() => ({ ...INITIAL_SESSION }));
+  });
+
+  const [activeIdx, setActiveIdx] = useState(() => {
+    const saved = localStorage.getItem('active_billing_idx');
+    if (saved) {
+      const idx = parseInt(saved, 10);
+      if (!isNaN(idx) && idx >= 0 && idx < 7) return idx;
+    }
+    return 0;
+  });
+
+  // Global UI state (not per-counter).
+  const [saving, setSaving] = useState(false);
+  const [sendingWhatsApp, setSendingWhatsApp] = useState(false);
+  const [showNewCust, setShowNewCust] = useState(false);
+  const [showNewDoc, setShowNewDoc] = useState(false);
+  const [showH1Modal, setShowH1Modal] = useState(false);
+  const [showSuggestions, setShowSuggestions] = useState(false);
+  const [suggestions, setSuggestions] = useState([]);
+  const [showCustDropdown, setShowCustDropdown] = useState(false);
+  const [showDocDropdown, setShowDocDropdown] = useState(false);
+
+  const timerRef = useRef(null);
+  const newBillBtnRef = useRef(null);
+  const searchRef = useRef(null);
+  const custInputRef = useRef(null);
+  const showToast = useToast();
+
+  const current = sessions[activeIdx];
+  const {
+    items, medSearch, selectedCustomer, custSearch, selectedDoctor,
+    docSearch, paymentMode, discount, billSaved, lastInvoice,
+    reviewTimer, h1Details, isGstEnabled,
+  } = current;
+
+  // Update the active counter (accepts an object or an updater function).
+  const updateActive = (updates) => {
+    setSessions((prev) => {
+      const next = [...prev];
+      const obj = next[activeIdx];
+      next[activeIdx] = { ...obj, ...(typeof updates === 'function' ? updates(obj) : updates) };
+      return next;
     });
+  };
 
-    const [activeIdx, setActiveIdx] = useState(() => {
-        const saved = localStorage.getItem('active_billing_idx');
-        if (saved) {
-            const idx = parseInt(saved);
-            if (!isNaN(idx) && idx >= 0 && idx < 7) return idx;
-        }
-        return 0;
+  // Field-level shims so the rest of the component reads like plain setState.
+  const setItems = (val) => updateActive((s) => ({ items: typeof val === 'function' ? val(s.items) : val }));
+  const setMedSearch = (val) => updateActive({ medSearch: val });
+  const setSelectedCustomer = (val) => updateActive({ selectedCustomer: val });
+  const setCustSearch = (val) => updateActive({ custSearch: val });
+  const setSelectedDoctor = (val) => updateActive({ selectedDoctor: val });
+  const setDocSearch = (val) => updateActive({ docSearch: val });
+  const setPaymentMode = (val) => updateActive({ paymentMode: val });
+  const setDiscount = (val) => updateActive({ discount: val });
+  const setIsGstEnabled = (val) => updateActive({ isGstEnabled: val });
+  // Was missing before — caused a ReferenceError when adding a Schedule-H1 medicine.
+  const setH1Details = (val) => updateActive((s) => ({ h1Details: typeof val === 'function' ? val(s.h1Details) : val }));
+  const setSessionReviewTimer = (idx, val) => {
+    setSessions((prev) => {
+      const next = [...prev];
+      next[idx] = { ...next[idx], reviewTimer: typeof val === 'function' ? val(next[idx].reviewTimer) : val };
+      return next;
     });
-    
-    // Global UI state (not session-specific)
-    const [saving, setSaving] = useState(false);
-    const [sendingWhatsApp, setSendingWhatsApp] = useState(false);
-    const [showNewCust, setShowNewCust] = useState(false);
-    const [showNewDoc, setShowNewDoc] = useState(false);
-    const [showH1Modal, setShowH1Modal] = useState(false);
-    const [showSuggestions, setShowSuggestions] = useState(false);
-    const [suggestions, setSuggestions] = useState([]);
-    const [showCustDropdown, setShowCustDropdown] = useState(false);
-    const [showDocDropdown, setShowDocDropdown] = useState(false);
-
-    const timerRef = useRef(null);
-    const newBillBtnRef = useRef(null);
-    const searchRef = useRef();
-    const showToast = useToast();
-
-    // Derived session state for easier access
-    const current = sessions[activeIdx];
-    const { 
-        items, medSearch, selectedCustomer, custSearch, selectedDoctor, 
-        docSearch, paymentMode, discount, billSaved, lastInvoice, 
-        reviewTimer, h1Details, isGstEnabled 
-    } = current;
-
-    // Helper to update current session
-    const updateActive = (updates) => {
-        setSessions(prev => {
-            const next = [...prev];
-            const currentObj = next[activeIdx];
-            next[activeIdx] = { 
-                ...currentObj, 
-                ...(typeof updates === 'function' ? updates(currentObj) : updates) 
-            };
-            return next;
-        });
-    };
-
-    // Shims for existing setters
-    const setItems = (val) => updateActive(s => ({ items: typeof val === 'function' ? val(s.items) : val }));
-    const setMedSearch = (val) => updateActive({ medSearch: val });
-    const setSelectedCustomer = (val) => updateActive({ selectedCustomer: val });
-    const setCustSearch = (val) => updateActive({ custSearch: val });
-    const setSelectedDoctor = (val) => updateActive({ selectedDoctor: val });
-    const setDocSearch = (val) => updateActive({ docSearch: val });
-    const setPaymentMode = (val) => updateActive({ paymentMode: val });
-    const setDiscount = (val) => updateActive({ discount: val });
-    const setBillSaved = (val) => updateActive({ billSaved: val });
-    const setLastInvoice = (val) => updateActive({ lastInvoice: val });
-    const setReviewTimer = (val) => updateActive(s => ({ reviewTimer: typeof val === 'function' ? val(s.reviewTimer) : val }));
-    const setSessionReviewTimer = (idx, val) => {
-        setSessions(prev => {
-            const next = [...prev];
-            next[idx] = { ...next[idx], reviewTimer: typeof val === 'function' ? val(next[idx].reviewTimer) : val };
-            return next;
-        });
-    };
-    const setIsGstEnabled = (val) => updateActive({ isGstEnabled: val });
+  };
 
   useEffect(() => {
-    api.getMedicines().then(setMedicines);
-    api.getCustomers().then(setCustomers);
-    api.getDoctors().then(setDoctors);
-    api.getSettings().then(setSettings).catch(err => console.error('Failed to load settings', err));
+    api.getMedicines().then(setMedicines).catch(() => showToast('Failed to load medicines', 'error'));
+    api.getCustomers().then(setCustomers).catch(() => {});
+    api.getDoctors().then(setDoctors).catch(() => {});
+    api.getSettings().then(setSettings).catch((err) => console.error('Failed to load settings', err));
   }, []);
 
-  // Save to persistence
-  useEffect(() => {
-    localStorage.setItem('billing_sessions', JSON.stringify(sessions));
-  }, [sessions]);
+  useEffect(() => { localStorage.setItem('billing_sessions', JSON.stringify(sessions)); }, [sessions]);
+  useEffect(() => { localStorage.setItem('active_billing_idx', String(activeIdx)); }, [activeIdx]);
 
+  // Focus the "New Bill" button once a bill is saved, so Enter starts the next one.
   useEffect(() => {
-    localStorage.setItem('active_billing_idx', activeIdx.toString());
-  }, [activeIdx]);
-
-  // Timer logic for auto-focus and countdown
-  useEffect(() => {
-    if (billSaved && newBillBtnRef.current) {
-        newBillBtnRef.current.focus();
-    }
+    if (billSaved && newBillBtnRef.current) newBillBtnRef.current.focus();
   }, [billSaved]);
 
-  const medFuse = useMemo(() => new Fuse(medicines, {
-    keys: ['alias', 'brand_name', 'generic_name', 'company_name'],
-    threshold: 0.2, // Slightly stricter to prefer exact alias matches
-    distance: 100
-  }), [medicines]);
+  // Clear the review-timer interval on unmount.
+  useEffect(() => () => { if (timerRef.current) clearInterval(timerRef.current); }, []);
 
-  const custFuse = useMemo(() => new Fuse(customers, {
-    keys: ['name', 'phone'],
-    threshold: 0.3
-  }), [customers]);
+  const medFuse = useMemo(
+    () => new Fuse(medicines, { keys: ['alias', 'brand_name', 'generic_name', 'company_name'], threshold: 0.2, distance: 100 }),
+    [medicines]
+  );
+  const custFuse = useMemo(() => new Fuse(customers, { keys: ['name', 'phone'], threshold: 0.3 }), [customers]);
 
   useEffect(() => {
-    if (!medSearch.trim()) { setSuggestions([]); return; }
-    const results = medFuse.search(medSearch);
-    const filtered = results.map(r => r.item).slice(0, 10);
+    if (!medSearch.trim()) { setSuggestions([]); setShowSuggestions(false); return; }
+    const filtered = medFuse.search(medSearch).map((r) => r.item).slice(0, 10);
     setSuggestions(filtered);
     setShowSuggestions(filtered.length > 0);
   }, [medSearch, medFuse]);
 
   const filteredCustomers = useMemo(() => {
     if (!custSearch.trim()) return customers;
-    return custFuse.search(custSearch).map(r => r.item);
+    return custFuse.search(custSearch).map((r) => r.item);
   }, [custSearch, customers, custFuse]);
 
-  const filteredDoctors = docSearch ? doctors.filter(d => d.name.toLowerCase().includes(docSearch.toLowerCase())) : doctors;
+  const filteredDoctors = docSearch
+    ? doctors.filter((d) => d.name.toLowerCase().includes(docSearch.toLowerCase()))
+    : doctors;
 
-    const getEffectivePrice = (item) => {
-      const tps = item.tablets_per_strip || 10;
-      const isTabletLike = ['Tablet','Capsule','Strip'].includes(item.unit_category);
-      return isTabletLike ? (item.unit_price / tps) : item.unit_price;
-    };
+  // GST-INCLUSIVE totals: each line's gross already contains tax, so we extract
+  // the taxable base and contained GST per line and never add tax on top.
+  const getSessionTotals = (session) => {
+    let sub = 0;
+    let gst = 0;
+    for (const item of session.items) {
+      const gross = calculateLineTotal(item.quantity, effectiveUnitPrice(item), item.discount_percent);
+      const pct = session.isGstEnabled ? item.gst_percent : 0;
+      const split = splitInclusive(gross, pct);
+      sub += split.taxable;
+      gst += split.gst;
+    }
+    sub = round2(sub);
+    gst = round2(gst);
+    const total = Math.max(0, round2(sub + gst - session.discount));
+    return { subtotal: sub, gstAmount: gst, totalAmount: total, itemCount: session.items.length };
+  };
 
-    const getSessionTotals = (session) => {
-      const sub = session.items.reduce((sum, item) => sum + calculateLineTotal(item.quantity, getEffectivePrice(item), item.discount_percent), 0);
-      const gst = session.isGstEnabled 
-        ? session.items.reduce((sum, item) => {
-            const lineTotal = calculateLineTotal(item.quantity, getEffectivePrice(item), item.discount_percent);
-            return sum + calculateGstFromTotal(lineTotal, item.gst_percent);
-          }, 0)
-        : 0;
-      const total = Math.max(0, Math.round((sub + gst - session.discount) * 100) / 100);
-      return { subtotal: sub, gstAmount: gst, totalAmount: total, itemCount: session.items.length };
-    };
-
-    const { subtotal, gstAmount, totalAmount, itemCount } = getSessionTotals(current);
+  const { subtotal, gstAmount, totalAmount } = getSessionTotals(current);
 
   const addMedicine = async (med) => {
     try {
-      // Fetch full medicine details to get batches
       const fullMed = await api.getMedicine(med.id);
-      const batches = (fullMed.batches || []).filter(b => b.quantity > 0);
+      const today = todayStr();
+      const inStock = (fullMed.batches || []).filter((b) => b.quantity > 0);
+      // Never offer expired stock for sale — mirrors the server-side sell guard.
+      const batches = inStock.filter((b) => !b.expiry_date || b.expiry_date >= today);
 
       if (batches.length === 0) {
-        showToast(`Out of stock: ${med.brand_name}`, 'error');
+        showToast(
+          inStock.length === 0 ? `Out of stock: ${med.brand_name}` : `Only expired stock available: ${med.brand_name}`,
+          'error'
+        );
         return;
       }
 
-      // FIFO: Auto-select batch with nearest expiry
+      // FEFO: batches arrive ordered by expiry; first non-expired one is nearest.
       const batch = batches[0];
-      const tabletsPerStrip = fullMed.tablets_per_strip || med.tablets_per_strip || 10;
+      const tps = fullMed.tablets_per_strip || med.tablets_per_strip || 10;
 
-      setItems(prev => {
-        // Check if this batch is already in the list
-        const existingIdx = prev.findIndex(i => i.id === med.id && i.batch_id === batch.id);
+      setItems((prev) => {
+        const existingIdx = prev.findIndex((i) => i.id === med.id && i.batch_id === batch.id);
         if (existingIdx >= 0) {
           const existing = prev[existingIdx];
           if (existing.quantity >= existing.max_qty) {
@@ -208,8 +212,6 @@ export default function Billing() {
           newItems[existingIdx] = { ...existing, quantity: existing.quantity + 1 };
           return newItems;
         }
-
-        // Add new item
         return [...prev, {
           id: med.id,
           brand_name: med.brand_name,
@@ -218,19 +220,21 @@ export default function Billing() {
           batch_number: batch.batch_number,
           expiry_date: batch.expiry_date,
           quantity: 1,
-          unit_price: batch.mrp,
+          // Q1: bill at the SELLING price (per strip), falling back to MRP when
+          // no selling rate is set. MRP kept separately for the savings display.
+          unit_price: batch.selling_rate || batch.mrp,
           mrp: batch.mrp,
           max_qty: batch.quantity,
           discount_percent: 0,
           gst_percent: med.gst_percent || 12,
           is_h1: med.is_h1,
-          tablets_per_strip: tabletsPerStrip,
+          tablets_per_strip: tps,
           unit_category: fullMed.unit_category || med.unit_category || 'Tablet',
         }];
       });
 
       if (med.is_h1) {
-        setH1Details(prev => ({
+        setH1Details((prev) => ({
           ...prev,
           patient_name: selectedCustomer?.name || prev.patient_name || '',
           patient_address: selectedCustomer?.address || prev.patient_address || '',
@@ -242,8 +246,8 @@ export default function Billing() {
 
       setMedSearch('');
       setSuggestions([]);
+      setShowSuggestions(false);
       if (searchRef.current) searchRef.current.focus();
-
     } catch (err) {
       console.error(err);
       showToast('Failed to load batch info', 'error');
@@ -251,39 +255,47 @@ export default function Billing() {
   };
 
   const updateItem = (index, field, value) => {
-    setItems(prev => {
+    setItems((prev) => {
       const newItems = [...prev];
       newItems[index] = { ...newItems[index], [field]: value };
       return newItems;
     });
   };
 
-  const removeItem = (index) => {
-    setItems(prev => prev.filter((_, i) => i !== index));
-  };
+  const removeItem = (index) => setItems((prev) => prev.filter((_, i) => i !== index));
 
   const resetBilling = () => {
-    updateActive({ 
-      ...INITIAL_SESSION,
-      items: [], // ensure new array reference
-      h1Details: { ...INITIAL_SESSION.h1Details } 
-    });
     if (timerRef.current) clearInterval(timerRef.current);
-    setTimeout(() => {
-      if (searchRef.current) searchRef.current.focus();
-    }, 100);
+    updateActive({ ...INITIAL_SESSION, items: [], h1Details: { ...INITIAL_SESSION.h1Details } });
+    setTimeout(() => { if (searchRef.current) searchRef.current.focus(); }, 100);
   };
 
   const handleSave = async () => {
     if (items.length === 0 || billSaved) return;
-    if (items.some(i => !i.quantity || i.quantity <= 0)) {
+
+    // ---- Pre-flight validation (before we flip into the saving state) ----
+    if (items.some((i) => !i.quantity || i.quantity <= 0)) {
       showToast('All items must have a valid quantity greater than 0', 'error');
       return;
     }
-    if (items.some(i => i.quantity > i.max_qty)) {
-      showToast('Some items exceed available stock limits. Please fix quantities before saving.', 'error');
+    if (items.some((i) => i.quantity > i.max_qty)) {
+      showToast('Some items exceed available stock. Please fix quantities before saving.', 'error');
       return;
     }
+    if (items.some((i) => i.is_h1)) {
+      const d = h1Details;
+      if (!d.patient_name?.trim() || !d.doctor_name?.trim() || !d.doctor_reg_no?.trim() || !d.prescription_no?.trim()) {
+        setShowH1Modal(true);
+        showToast('Schedule H1 details are mandatory for this bill', 'error');
+        return;
+      }
+    }
+    if (paymentMode === 'Pending' && !selectedCustomer) {
+      showToast('Please select or add a customer for Pending / Credit payment', 'error');
+      if (custInputRef.current) custInputRef.current.focus();
+      return;
+    }
+
     setSaving(true);
     try {
       const invoiceData = {
@@ -292,68 +304,35 @@ export default function Billing() {
         payment_mode: paymentMode,
         is_gst_enabled: isGstEnabled,
         discount_amount: discount,
-        items: items.map(item => {
-          const tps = item.tablets_per_strip || 10;
-          const isTabletLike = ['Tablet','Capsule','Strip'].includes(item.unit_category);
-          const effectivePrice = isTabletLike ? (item.unit_price / tps) : item.unit_price;
-          return {
-            medicine_id: item.id,
-            batch_id: item.batch_id,
-            quantity: item.quantity,
-            unit_price: effectivePrice,  // Always per-unit (per-tablet) price
-            discount_percent: item.discount_percent,
-            gst_percent: item.gst_percent,
-            tablets_per_strip: tps,
-          };
-        }),
-        h1_details: items.some(i => i.is_h1) ? h1Details : null
+        items: items.map((item) => ({
+          medicine_id: item.id,
+          batch_id: item.batch_id,
+          quantity: item.quantity,
+          unit_price: effectiveUnitPrice(item), // always per-unit (per-tablet)
+          discount_percent: item.discount_percent,
+          gst_percent: item.gst_percent,
+          tablets_per_strip: item.tablets_per_strip || 10,
+        })),
+        h1_details: items.some((i) => i.is_h1) ? h1Details : null,
       };
 
-      if (items.some(i => i.is_h1)) {
-        const d = h1Details;
-        if (!d.patient_name?.trim() || !d.doctor_name?.trim() || !d.doctor_reg_no?.trim() || !d.prescription_no?.trim()) {
-          setShowH1Modal(true);
-          showToast('Schedule H1 details are mandatory for this bill', 'error');
-          return;
-        }
-      }
-
-      if (paymentMode === 'Pending' && !selectedCustomer) {
-        showToast('Please select or add a customer for Pending/Credit payment', 'error');
-        // Auto-focus customer search
-        const custInput = document.querySelector('input[placeholder="Search customer..."]');
-        if (custInput) custInput.focus();
-        return;
-      }
-
       const savedInvoice = await api.createInvoice(invoiceData);
-      const sessionSavedAt = activeIdx; // Remember which counter we're saving
-      
-      setSessions(prev => {
+      const savedAt = activeIdx;
+
+      setSessions((prev) => {
         const next = [...prev];
-        next[sessionSavedAt] = { ...next[sessionSavedAt], lastInvoice: savedInvoice, billSaved: true, reviewTimer: 20 };
+        next[savedAt] = { ...next[savedAt], lastInvoice: savedInvoice, billSaved: true, reviewTimer: 20 };
         return next;
       });
-      
+
       showToast('Invoice saved successfully');
-      
-      // Dispatch event to refresh header stats
-      window.dispatchEvent(new Event('invoice-saved'));
-      
-      // Start 20s review timer for THIS session
+      window.dispatchEvent(new Event('invoice-saved')); // refresh header stats
+
+      // 20s review countdown for the counter we just saved.
       if (timerRef.current) clearInterval(timerRef.current);
       timerRef.current = setInterval(() => {
-        setSessionReviewTimer(sessionSavedAt, prev => {
-          if (prev <= 1) {
-            // No need to clear interval here as it might be used by another session? 
-            // Actually, better to have a timer per session if we want accuracy, 
-            // but one interval updating all is also fine.
-            return 0;
-          }
-          return prev - 1;
-        });
+        setSessionReviewTimer(savedAt, (prev) => (prev <= 1 ? 0 : prev - 1));
       }, 1000);
-
     } catch (err) {
       console.error(err);
       showToast(err.message || 'Failed to save invoice', 'error');
@@ -362,87 +341,64 @@ export default function Billing() {
     }
   };
 
+  // ---- Keyboard shortcuts: F2 search · Alt/Ctrl+S save · Alt+1-7 counters · Enter ----
+  // The listener registers once; it reads the freshest state/handlers through a ref
+  // so a keyboard save never acts on a stale customer / payment mode / discount.
+  const kbdRef = useRef({});
+  kbdRef.current = {
+    billSaved, itemsLen: items.length, saving, medSearchTrim: medSearch.trim(),
+    modalOpen: showNewCust || showNewDoc || showH1Modal, handleSave, resetBilling,
+  };
   useEffect(() => {
     const handleKeyDown = (e) => {
-      // Don't trigger if a modal is open
-      if (showNewCust || showNewDoc || showH1Modal) return;
+      const s = kbdRef.current;
+      if (s.modalOpen) return; // let modals own the keyboard
 
-      // F2 to focus search
       if (e.key === 'F2') {
         e.preventDefault();
         if (searchRef.current) searchRef.current.focus();
         return;
       }
-
-      // Alt + S or Ctrl + S to Save Bill
       if ((e.altKey || e.ctrlKey) && e.key.toLowerCase() === 's') {
         e.preventDefault();
-        if (items.length > 0 && !billSaved && !saving) {
-          handleSave();
-        }
+        if (s.itemsLen > 0 && !s.billSaved && !s.saving) s.handleSave();
         return;
       }
-
-      // Alt + 1-7 for switching counters
       if (e.altKey && e.key >= '1' && e.key <= '7') {
-        const idx = parseInt(e.key) - 1;
-        setActiveIdx(idx);
+        setActiveIdx(parseInt(e.key, 10) - 1);
         setTimeout(() => { if (searchRef.current) searchRef.current.focus(); }, 50);
         return;
       }
-
       if (e.key === 'Enter') {
-        const activeElement = document.activeElement;
-        
-        if (billSaved) {
-          // If bill is saved, Enter resets for new bill
+        if (s.billSaved) {
           e.preventDefault();
-          resetBilling();
-        } else if (items.length > 0 && !saving) {
-          // If in medicine search and there is text, let the input's own onKeyDown handle adding medicine
-          if (activeElement === searchRef.current && medSearch.trim()) {
-            return;
-          }
-          
-          // Trigger save on Enter
+          s.resetBilling();
+        } else if (s.itemsLen > 0 && !s.saving) {
+          // If typing in the medicine search, let its own handler add the top hit.
+          if (document.activeElement === searchRef.current && s.medSearchTrim) return;
           e.preventDefault();
-          handleSave();
+          s.handleSave();
         }
       }
     };
-
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [billSaved, items, saving, medSearch, showNewCust, showNewDoc]);
+  }, []);
 
   const handlePrint = () => {
     if (!lastInvoice) return;
-    try {
-      generateInvoicePDF(lastInvoice, settings || {}, 'print');
-    } catch (err) {
-      console.error(err);
-      showToast('Failed to generate print preview', 'error');
-    }
+    try { generateInvoicePDF(lastInvoice, settings || {}, 'print'); }
+    catch (err) { console.error(err); showToast('Failed to generate print preview', 'error'); }
   };
-
   const handlePDF = () => {
     if (!lastInvoice) return;
-    try {
-      generateInvoicePDF(lastInvoice, settings || {}, 'download');
-    } catch (err) {
-      console.error(err);
-      showToast('Failed to generate PDF', 'error');
-    }
+    try { generateInvoicePDF(lastInvoice, settings || {}, 'download'); }
+    catch (err) { console.error(err); showToast('Failed to generate PDF', 'error'); }
   };
-
   const handleWhatsApp = async () => {
     if (!lastInvoice) return;
     const phone = lastInvoice.customer_phone || selectedCustomer?.phone || '';
-    if (!phone) {
-      showToast('No customer phone number available', 'warning');
-      return;
-    }
-
+    if (!phone) { showToast('No customer phone number available', 'warning'); return; }
     setSendingWhatsApp(true);
     try {
       await sendInvoiceViaWhatsApp(lastInvoice, settings);
@@ -455,385 +411,494 @@ export default function Billing() {
     }
   };
 
-
-    return (
-      <div className="billing-layout-container" style={{ display: 'flex', flexDirection: 'column', height: '100%', gap: 12 }}>
-        {/* Counter Tabs */}
-        <div className="flex gap-2 pb-2" style={{ borderBottom: '1px solid var(--border-glass)', overflowX: 'auto', flexShrink: 0 }}>
-          {sessions.map((session, i) => {
-            const isActive = i === activeIdx;
-            const { totalAmount, itemCount } = getSessionTotals(session);
-            const isEmpty = itemCount === 0;
-
-            return (
-              <button
-                key={i}
-                onClick={() => {
-                  setActiveIdx(i);
-                  setTimeout(() => { if (searchRef.current) searchRef.current.focus(); }, 100);
-                }}
-                className={`glass-card ${isActive ? 'active-counter' : ''}`}
-                style={{
-                  flex: 1,
-                  minWidth: 100,
-                  padding: '8px 12px',
-                  display: 'flex',
-                  flexDirection: 'column',
-                  gap: 2,
-                  cursor: 'pointer',
-                  border: isActive ? '2px solid var(--accent-blue)' : '1px solid var(--border-glass)',
-                  background: isActive ? 'rgba(0, 122, 255, 0.08)' : 'var(--bg-glass)',
-                  transform: isActive ? 'scale(1.02)' : 'scale(1)',
-                  transition: 'all 0.2s cubic-bezier(0.4, 0, 0.2, 1)',
-                  boxShadow: isActive ? '0 4px 12px rgba(0, 122, 255, 0.1)' : 'var(--shadow-sm)',
-                }}
-              >
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', width: '100%' }}>
-                  <span style={{ fontSize: 11, fontWeight: 700, color: isActive ? 'var(--accent-blue)' : 'var(--text-muted)', textTransform: 'uppercase' }}>
-                    Counter {i + 1} <span style={{ opacity: 0.4, fontSize: 9, marginLeft: 4 }}>[Alt+{i+1}]</span>
-                  </span>
-                  {itemCount > 0 && <span className="badge badge-blue" style={{ fontSize: 9, padding: '2px 6px' }}>{itemCount}</span>}
-                </div>
-                <div style={{ fontSize: 14, fontWeight: 800, color: isEmpty ? 'var(--text-muted)' : 'var(--text-primary)', opacity: isEmpty ? 0.3 : 1 }}>
-                  ₹{totalAmount.toFixed(0)}
-                </div>
-              </button>
-            );
-          })}
-        </div>
-
-        <div className="billing-layout" style={{ flex: 1, minHeight: 0 }}>
-        <div className="billing-left-col" style={{ display: 'flex', flexDirection: 'column', height: '100%', overflow: 'visible' }}>
-            {billSaved && (
-              <div className="glass-card mb-4" style={{ background: 'rgba(34, 197, 94, 0.15)', border: '1px solid rgba(34, 197, 94, 0.3)', padding: '12px 20px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', animation: 'slideDown 0.3s ease-out' }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-                  <div style={{ width: 32, height: 32, borderRadius: '50%', background: '#22c55e', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'white' }}>
-                    <RefreshCw size={18} />
-                  </div>
-                  <div>
-                    <div style={{ fontWeight: 600, color: '#166534', fontSize: 16 }}>Bill Generated Successfully!</div>
-                    <div style={{ fontSize: 13, color: '#166534', opacity: 0.8 }}>Invoice #{lastInvoice?.invoice_number} | Available for {reviewTimer}s</div>
-                  </div>
-                </div>
-                <button className="btn btn-success" onClick={resetBilling} style={{ height: 36, padding: '0 16px' }}>
-                  New Bill (Enter)
-                </button>
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', height: '100%', gap: 12 }}>
+      {/* ---------------- Counter tabs ---------------- */}
+      <div style={{ display: 'flex', gap: 8, overflowX: 'auto', flexShrink: 0, paddingBottom: 2 }}>
+        {sessions.map((session, i) => {
+          const isActive = i === activeIdx;
+          const { totalAmount: tabTotal, itemCount } = getSessionTotals(session);
+          return (
+            <button
+              key={i}
+              onClick={() => { setActiveIdx(i); setTimeout(() => searchRef.current?.focus(), 100); }}
+              style={{
+                flex: '1 0 108px', minWidth: 108, padding: '8px 12px', borderRadius: 'var(--radius-lg)',
+                border: isActive ? '1.5px solid var(--primary)' : '1px solid var(--border)',
+                background: isActive ? 'var(--primary-bg)' : 'var(--bg-secondary)',
+                cursor: 'pointer', textAlign: 'left', display: 'flex', flexDirection: 'column', gap: 3,
+                transition: 'border-color .15s, background .15s',
+              }}
+            >
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <span style={{ fontSize: 11, fontWeight: 700, letterSpacing: 0.3, textTransform: 'uppercase', color: isActive ? 'var(--primary)' : 'var(--text-muted)' }}>
+                  Counter {i + 1}
+                  <span style={{ opacity: 0.55, fontSize: 9, marginLeft: 4, fontWeight: 500 }}>Alt+{i + 1}</span>
+                </span>
+                {itemCount > 0 && <Badge tone="blue" style={{ fontSize: 9, padding: '1px 6px' }}>{itemCount}</Badge>}
               </div>
-            )}
-            <div className="glass-card mb-3" style={{ position: 'relative', zIndex: 100, flexShrink: 0, padding: '12px 20px' }}>
-              <div className="search-box" style={{ maxWidth: '100%' }}>
-                <Search />
-                <input 
-                  ref={searchRef} 
-                  className="form-input" 
-                  placeholder={billSaved ? "Bill Saved - Press Enter for New Bill" : "Type medicine name to add..."} 
-                  value={medSearch} 
-                  onChange={e => setMedSearch(e.target.value)} 
-                  onKeyDown={e => {
-                    if (e.key === 'Enter' && suggestions.length > 0) {
-                      addMedicine(suggestions[0]);
-                    }
-                  }}
-                  onFocus={() => !billSaved && medSearch && setShowSuggestions(true)} 
-                  onBlur={() => setTimeout(() => setShowSuggestions(false), 200)} 
-                  disabled={billSaved}
-                  autoFocus 
-                />
+              <div style={{ fontSize: 15, fontWeight: 800, color: itemCount ? 'var(--text-primary)' : 'var(--text-muted)' }}>
+                ₹{tabTotal.toFixed(0)}
+              </div>
+            </button>
+          );
+        })}
+      </div>
+
+      {/* ---------------- Main billing grid ---------------- */}
+      <div className="billing-layout" style={{ flex: 1, minHeight: 0 }}>
+        {/* LEFT: search + cart */}
+        <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
+          {billSaved && (
+            <div
+              className="glass-card"
+              style={{
+                background: 'var(--success-bg)', border: '1px solid #bbf7d0', padding: '12px 18px',
+                display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+                marginBottom: 12, animation: 'slideDown 0.25s ease-out', flexShrink: 0,
+              }}
+            >
+              <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                <CheckCircle2 size={26} color="var(--success)" />
+                <div>
+                  <div style={{ fontWeight: 700, color: '#166534', fontSize: 15 }}>Bill generated successfully</div>
+                  <div style={{ fontSize: 12.5, color: '#166534', opacity: 0.85 }}>
+                    Invoice #{lastInvoice?.invoice_number} · available to review for {reviewTimer}s
+                  </div>
+                </div>
+              </div>
+              <Button variant="success" onClick={resetBilling}>New Bill (Enter)</Button>
+            </div>
+          )}
+
+          {/* Medicine search */}
+          <div className="glass-card" style={{ position: 'relative', zIndex: 100, flexShrink: 0, padding: 12, marginBottom: 12 }}>
+            <div className="search-box">
+              <Search />
+              <input
+                ref={searchRef}
+                className="form-input"
+                placeholder={billSaved ? 'Bill saved — press Enter for a new bill' : 'Type a medicine name or alias to add…'}
+                value={medSearch}
+                onChange={(e) => setMedSearch(e.target.value)}
+                onKeyDown={(e) => { if (e.key === 'Enter' && suggestions.length > 0) addMedicine(suggestions[0]); }}
+                onFocus={() => !billSaved && medSearch && setShowSuggestions(true)}
+                onBlur={() => setTimeout(() => setShowSuggestions(false), 200)}
+                disabled={billSaved}
+                autoFocus
+              />
               {showSuggestions && (
                 <div className="autocomplete-dropdown">
-                  {suggestions.map(m => (
-                    <div key={m.id} className="autocomplete-item" onMouseDown={() => addMedicine(m)}>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                        <div style={{ fontWeight: 500 }}>{m.brand_name}</div>
-                        {m.alias && <span className="badge badge-blue" style={{ fontSize: 10 }}>{m.alias}</span>}
+                  {suggestions.map((m) => {
+                    const lowStock = (m.total_stock ?? 0) <= 10;
+                    return (
+                      <div key={m.id} className="autocomplete-item" onMouseDown={() => addMedicine(m)}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                          <span style={{ fontWeight: 600 }}>{m.brand_name}</span>
+                          {m.alias && <Badge tone="blue" style={{ fontSize: 10 }}>{m.alias}</Badge>}
+                          {m.is_h1 === 1 && <Badge tone="red" style={{ fontSize: 9 }}>H1</Badge>}
+                        </div>
+                        <div className="item-subtitle" style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                          <span>{m.company_name}</span>
+                          <Badge tone={lowStock ? 'red' : 'green'} style={{ fontSize: 10 }}>Stock: {m.total_stock ?? 0}</Badge>
+                          <span>GST {m.gst_percent}%</span>
+                          {TABLET_LIKE.includes(m.unit_category) && m.tablets_per_strip > 1 && (
+                            <Badge tone="gray" style={{ fontSize: 10, marginLeft: 'auto' }}>1×{m.tablets_per_strip}</Badge>
+                          )}
+                        </div>
                       </div>
-                      <div className="item-subtitle" style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
-                        <span>{m.company_name}</span>
-                        <span style={{ color: 'var(--text-muted)' }}>|</span>
-                        <span style={{ 
-                          fontWeight: 700, 
-                          color: m.total_stock <= 10 ? 'var(--accent-rose)' : 'var(--accent-green)',
-                          background: m.total_stock <= 10 ? 'rgba(255, 59, 48, 0.1)' : 'rgba(52, 199, 89, 0.1)',
-                          padding: '0 6px',
-                          borderRadius: 4
-                        }}>
-                          Stock: {m.total_stock}
-                        </span>
-                        <span style={{ color: 'var(--text-muted)' }}>|</span>
-                        <span>GST: {m.gst_percent}%</span>
-                        {['Tablet','Capsule','Strip'].includes(m.unit_category) && m.tablets_per_strip > 1 && (
-                          <span className="badge badge-blue" style={{ fontSize: 10, marginLeft: 'auto' }}>1×{m.tablets_per_strip} strip</span>
-                        )}
-                      </div>
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
               )}
             </div>
           </div>
-          <div style={{ flex: 1, overflowY: 'auto', minHeight: 0, paddingBottom: 10 }}>
-          <div className="glass-card" style={{ padding: '12px' }}>
-            {items.length === 0 ? <div className="empty-state" style={{ height: 120 }}><p>Search and add medicines above</p></div> : (
-              <table className="data-table">
-                <thead><tr><th>Medicine</th><th>Batch</th><th>Expiry</th><th style={{ width: 60 }}>Strip</th><th style={{ width: 70 }}>Qty</th><th>Stock</th><th>Rate</th><th>Per Tab</th><th style={{ width: 60 }}>Disc%</th><th>GST%</th><th className="text-right">Total</th><th></th></tr></thead>
-                <tbody>
-                  {items.map((item, idx) => {
-                    const tps = item.tablets_per_strip || 10;
-                    const isTabletLike = ['Tablet','Capsule','Strip'].includes(item.unit_category);
-                    const perTabPrice = isTabletLike ? (item.unit_price / tps) : item.unit_price;
-                    const strips = isTabletLike ? Math.floor(item.quantity / tps) : 0;
-                    const extraTabs = isTabletLike ? (item.quantity % tps) : 0;
-                    const stripLabel = isTabletLike
-                      ? (strips > 0 && extraTabs > 0
-                          ? `${strips} strip${strips > 1 ? 's' : ''} + ${extraTabs} tab${extraTabs > 1 ? 's' : ''}`
-                          : strips > 0
-                          ? `${strips} strip${strips > 1 ? 's' : ''}`
-                          : `${extraTabs} tab${extraTabs !== 1 ? 's' : ''}`)
-                      : '';
-                    return (
-                      <tr key={idx}>
-                        <td style={{ fontWeight: 600, fontSize: 12 }}>
-                          <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-                            {item.brand_name}
-                            {item.is_h1 === 1 && <span className="badge badge-red" style={{ fontSize: 9, padding: '1px 4px' }}>H1</span>}
-                          </div>
-                          <span className="text-muted" style={{ fontSize: 10 }}>{item.company_name}</span>
-                        </td>
-                        <td style={{ fontSize: 11 }}>{item.batch_number}</td>
-                        <td style={{ fontSize: 11 }}>{item.expiry_date}</td>
-                        <td style={{ fontSize: 11 }}>
-                          {isTabletLike ? (
-                            <span className="badge badge-blue" style={{ fontSize: 10 }}>1×{tps}</span>
-                          ) : <span className="text-muted">—</span>}
-                        </td>
-                        <td>
-                          <input
-                            type="number"
-                            className={`form-input ${item.quantity > item.max_qty || item.quantity <= 0 ? 'input-error' : ''}`}
-                            style={{ width: 55, padding: '2px 4px', textAlign: 'center', fontSize: 12 }}
-                            value={item.quantity}
-                            onChange={e => {
-                              const val = e.target.value;
-                              updateItem(idx, 'quantity', val === '' ? '' : parseInt(val));
-                            }}
-                            min={1}
-                            max={item.max_qty}
-                            disabled={billSaved}
-                            title={isTabletLike ? `Enter number of tablets (1 strip = ${tps} tabs)` : 'Quantity'}
-                          />
-                          {isTabletLike && item.quantity > 0 && (
-                            <div style={{ fontSize: 10, color: 'var(--accent-primary)', marginTop: 2, whiteSpace: 'nowrap' }}>{stripLabel}</div>
-                          )}
-                          {item.quantity > item.max_qty && (
-                            <div style={{ fontSize: 10, color: 'var(--accent-rose)', marginTop: 4, whiteSpace: 'normal', lineHeight: 1.2, width: 80 }}>
-                              Max {item.max_qty} in stock
+
+          {/* Cart */}
+          <div style={{ flex: 1, overflowY: 'auto', minHeight: 0 }}>
+            <div className="glass-card" style={{ padding: items.length === 0 ? 16 : 4, overflow: 'hidden' }}>
+              {items.length === 0 ? (
+                <div className="empty-state" style={{ height: 220 }}>
+                  <ShoppingCart size={40} style={{ opacity: 0.35, marginBottom: 10 }} />
+                  <p style={{ fontWeight: 600 }}>No items yet</p>
+                  <p style={{ fontSize: 13, color: 'var(--text-muted)' }}>Search a medicine above (or press F2) to start the bill.</p>
+                </div>
+              ) : (
+                <table className="data-table">
+                  <thead>
+                    <tr>
+                      <th>Item</th>
+                      <th style={{ width: 64 }}>Pack</th>
+                      <th style={{ width: 92 }}>Qty</th>
+                      <th className="text-right" style={{ width: 120 }}>Rate</th>
+                      <th style={{ width: 62 }}>Disc%</th>
+                      <th style={{ width: 56 }}>GST</th>
+                      <th className="text-right" style={{ width: 96 }}>Total</th>
+                      <th style={{ width: 40 }} />
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {items.map((item, idx) => {
+                      const tps = item.tablets_per_strip || 10;
+                      const isTabletLike = TABLET_LIKE.includes(item.unit_category);
+                      const perUnit = isTabletLike ? item.unit_price / tps : item.unit_price;
+                      const lineTotal = item.quantity > 0 ? item.quantity * perUnit * (1 - (item.discount_percent || 0) / 100) : 0;
+                      const strips = isTabletLike ? Math.floor(item.quantity / tps) : 0;
+                      const extraTabs = isTabletLike ? item.quantity % tps : 0;
+                      const stripLabel = !isTabletLike || !item.quantity ? ''
+                        : strips > 0 && extraTabs > 0 ? `${strips} strip${strips > 1 ? 's' : ''} + ${extraTabs} tab${extraTabs > 1 ? 's' : ''}`
+                        : strips > 0 ? `${strips} strip${strips > 1 ? 's' : ''}`
+                        : `${extraTabs} tab${extraTabs !== 1 ? 's' : ''}`;
+                      const overStock = item.quantity > item.max_qty;
+                      const savePct = item.mrp && item.unit_price < item.mrp ? Math.round(((item.mrp - item.unit_price) / item.mrp) * 100) : 0;
+                      return (
+                        <tr key={idx}>
+                          <td>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontWeight: 600, fontSize: 12.5 }}>
+                              {item.brand_name}
+                              {item.is_h1 === 1 && <Badge tone="red" style={{ fontSize: 9 }}>H1</Badge>}
                             </div>
-                          )}
-                          {item.quantity <= 0 && (
-                            <div style={{ fontSize: 10, color: 'var(--accent-rose)', marginTop: 4, whiteSpace: 'normal', lineHeight: 1.2, width: 80 }}>
-                              Min 1 required
+                            <div className="text-muted" style={{ fontSize: 10.5 }}>
+                              {item.company_name ? `${item.company_name} · ` : ''}Batch {item.batch_number}
+                              {item.expiry_date ? ` · Exp ${item.expiry_date}` : ''}
                             </div>
-                          )}
-                        </td>
-                        <td>
-                          <div className={`badge ${item.max_qty <= 10 ? 'badge-red' : 'badge-green'}`} style={{ fontSize: 11, padding: '4px 8px' }}>
-                            {item.max_qty}
-                          </div>
-                        </td>
-                        <td style={{ fontSize: 12 }}>₹{item.unit_price.toFixed(2)}{isTabletLike && <span className="text-muted" style={{ fontSize: 9 }}>/s</span>}</td>
-                        <td style={{ fontSize: 11, color: 'var(--text-secondary)' }}>
-                          {isTabletLike ? `₹${perTabPrice.toFixed(2)}` : '—'}
-                        </td>
-                        <td><input type="number" className="form-input" style={{ width: 50, padding: '2px 4px', textAlign: 'center', fontSize: 12 }} value={item.discount_percent} onChange={e => updateItem(idx, 'discount_percent', Number(e.target.value) || 0)} min={0} max={100} disabled={billSaved} /></td>
-                        <td style={{ fontSize: 11 }}>{item.gst_percent}%</td>
-                        <td className="text-right" style={{ fontWeight: 700, fontSize: 13 }}>₹{(item.quantity * perTabPrice * (1 - item.discount_percent / 100)).toFixed(2)}</td>
-                        <td><button className="btn btn-danger btn-sm" onClick={() => removeItem(idx)} style={{ padding: '2px 4px' }} disabled={billSaved}><Trash2 size={12}/></button></td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            )}
-          </div>
+                          </td>
+                          <td>
+                            {isTabletLike ? <Badge tone="gray" style={{ fontSize: 10 }}>1×{tps}</Badge> : <span className="text-muted">—</span>}
+                          </td>
+                          <td>
+                            <Input
+                              type="number"
+                              min={1}
+                              max={item.max_qty}
+                              value={item.quantity}
+                              error={overStock || item.quantity <= 0}
+                              disabled={billSaved}
+                              onChange={(e) => updateItem(idx, 'quantity', e.target.value === '' ? '' : parseInt(e.target.value, 10))}
+                              style={{ width: 64, padding: '3px 6px', textAlign: 'center', fontSize: 12.5 }}
+                              title={isTabletLike ? `Number of tablets (1 strip = ${tps})` : 'Quantity'}
+                            />
+                            {isTabletLike && item.quantity > 0 && (
+                              <div style={{ fontSize: 10, color: 'var(--primary)', marginTop: 2, whiteSpace: 'nowrap' }}>{stripLabel}</div>
+                            )}
+                            <div style={{ fontSize: 10, marginTop: 2, color: overStock ? 'var(--danger)' : 'var(--text-muted)', whiteSpace: 'nowrap' }}>
+                              {item.quantity <= 0 ? 'Min 1 required' : overStock ? `Only ${item.max_qty} in stock` : `Max ${item.max_qty}`}
+                            </div>
+                          </td>
+                          <td className="text-right">
+                            <div style={{ fontWeight: 600, fontSize: 12.5 }}>
+                              ₹{item.unit_price.toFixed(2)}{isTabletLike && <span className="text-muted" style={{ fontSize: 9 }}>/strip</span>}
+                            </div>
+                            {savePct > 0 && (
+                              <div style={{ fontSize: 10, color: 'var(--text-muted)' }}>
+                                <s>₹{item.mrp.toFixed(2)}</s> <span style={{ color: 'var(--success)' }}>−{savePct}%</span>
+                              </div>
+                            )}
+                            {isTabletLike && (
+                              <div className="text-muted" style={{ fontSize: 10 }}>₹{perUnit.toFixed(2)}/unit</div>
+                            )}
+                          </td>
+                          <td>
+                            <Input
+                              type="number"
+                              min={0}
+                              max={100}
+                              value={item.discount_percent}
+                              disabled={billSaved}
+                              onChange={(e) => updateItem(idx, 'discount_percent', Number(e.target.value) || 0)}
+                              style={{ width: 54, padding: '3px 6px', textAlign: 'center', fontSize: 12.5 }}
+                            />
+                          </td>
+                          <td style={{ fontSize: 12 }}>{item.gst_percent}%</td>
+                          <td className="text-right" style={{ fontWeight: 700, fontSize: 13 }}>{money(lineTotal)}</td>
+                          <td className="text-right">
+                            <Button variant="ghost" size="sm" icon={Trash2} onClick={() => removeItem(idx)} disabled={billSaved} title="Remove item" />
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              )}
+            </div>
           </div>
         </div>
-          <div className="billing-summary" style={{ gap: 10 }}>
-              <div className="glass-card" style={{ position: 'relative', zIndex: 20, padding: '12px 16px' }}>
-                <div className="flex justify-between items-center mb-3"><span className="card-title" style={{ margin: 0 }}>Customer</span><button className="btn btn-secondary btn-sm" onClick={() => setShowNewCust(true)} disabled={billSaved} style={{ padding: '4px 8px' }}><UserPlus size={12}/></button></div>
-                <div style={{ position: 'relative' }}>
-                  <input className="form-input" placeholder="Search customer..." value={selectedCustomer ? selectedCustomer.name : custSearch} onChange={e => { setCustSearch(e.target.value); setSelectedCustomer(null); setShowCustDropdown(true); }} onFocus={() => !billSaved && setShowCustDropdown(true)} onBlur={() => setTimeout(() => setShowCustDropdown(false), 200)} disabled={billSaved} />
-                  {selectedCustomer && !billSaved && <button style={{ position: 'absolute', right: 8, top: 12, background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-muted)' }} onClick={() => { setSelectedCustomer(null); setCustSearch(''); }}><X size={16}/></button>}
-                  {showCustDropdown && !selectedCustomer && !billSaved && (
-                    <div className="autocomplete-dropdown">
-                      {filteredCustomers.slice(0, 8).map(c => <div key={c.id} className="autocomplete-item" onMouseDown={() => { setSelectedCustomer(c); setCustSearch(''); setShowCustDropdown(false); }}>{c.name} {c.phone && <span className="text-muted"> - {c.phone}</span>}{c.credit_balance > 0 && <span className="badge badge-red" style={{ marginLeft: 6 }}>₹{c.credit_balance}</span>}</div>)}
-                    </div>
-                  )}
-                </div>
-              </div>
-              <div className="glass-card" style={{ position: 'relative', zIndex: 15, padding: '12px 16px' }}>
-                <div className="flex justify-between items-center mb-3"><span className="card-title" style={{ margin: 0 }}>Doctor</span><button className="btn btn-secondary btn-sm" onClick={() => setShowNewDoc(true)} disabled={billSaved} style={{ padding: '4px 8px' }}><Stethoscope size={12}/></button></div>
-                <div style={{ position: 'relative' }}>
-                  <input className="form-input" placeholder="Search doctor..." value={selectedDoctor ? selectedDoctor.name : docSearch} onChange={e => { setDocSearch(e.target.value); setSelectedDoctor(null); setShowDocDropdown(true); }} onFocus={() => !billSaved && setShowDocDropdown(true)} onBlur={() => setTimeout(() => setShowDocDropdown(false), 200)} disabled={billSaved} />
-                  {selectedDoctor && !billSaved && <button style={{ position: 'absolute', right: 8, top: 12, background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-muted)' }} onClick={() => { setSelectedDoctor(null); setDocSearch(''); }}><X size={16}/></button>}
-                  {showDocDropdown && !selectedDoctor && !billSaved && (
-                    <div className="autocomplete-dropdown">
-                      {filteredDoctors.slice(0, 8).map(d => <div key={d.id} className="autocomplete-item" onMouseDown={() => { setSelectedDoctor(d); setDocSearch(''); setShowDocDropdown(false); }}>Dr. {d.name} <span className="text-muted">{d.hospital && ` - ${d.hospital}`}</span></div>)}
-                    </div>
-                  )}
-                </div>
-              </div>
-            <div className="glass-card" style={{ padding: '12px 16px' }}>
-              <div className="card-title" style={{ marginBottom: 6 }}>Payment Mode</div>
-              <div className="flex gap-2">{['Cash', 'UPI', 'Pending'].map(mode => <button key={mode} className={`btn ${paymentMode === mode ? 'btn-primary' : 'btn-secondary'}`} onClick={() => !billSaved && setPaymentMode(mode)} disabled={billSaved} style={{ flex: 1, padding: '6px 4px', fontSize: 12 }}>{mode}</button>)}</div>
-            </div>
 
-            <div className="glass-card" style={{ flex: 1, padding: '12px 16px' }}>
-              <div className="flex justify-between items-center mb-2">
-                <div className="card-title" style={{ margin: 0 }}>Bill Summary</div>
-                <button 
-                  className={`btn btn-sm ${isGstEnabled ? 'btn-primary' : 'btn-secondary'}`}
-                  onClick={() => !billSaved && setIsGstEnabled(!isGstEnabled)}
-                  disabled={billSaved}
-                  style={{ fontSize: 10, padding: '2px 6px' }}
+        {/* RIGHT: summary column */}
+        <div className="billing-summary" style={{ gap: 10 }}>
+          {/* Customer */}
+          <div className="glass-card" style={{ position: 'relative', zIndex: 20, padding: '12px 14px' }}>
+            <div className="flex justify-between items-center mb-2">
+              <span className="card-title" style={{ margin: 0 }}>Customer</span>
+              <Button variant="secondary" size="sm" icon={UserPlus} onClick={() => setShowNewCust(true)} disabled={billSaved} title="New customer" />
+            </div>
+            <div style={{ position: 'relative' }}>
+              <input
+                ref={custInputRef}
+                className="form-input"
+                placeholder="Search customer…"
+                value={selectedCustomer ? selectedCustomer.name : custSearch}
+                onChange={(e) => { setCustSearch(e.target.value); setSelectedCustomer(null); setShowCustDropdown(true); }}
+                onFocus={() => !billSaved && setShowCustDropdown(true)}
+                onBlur={() => setTimeout(() => setShowCustDropdown(false), 200)}
+                disabled={billSaved}
+              />
+              {selectedCustomer && !billSaved && (
+                <button
+                  type="button"
+                  style={{ position: 'absolute', right: 8, top: 9, background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-muted)' }}
+                  onClick={() => { setSelectedCustomer(null); setCustSearch(''); }}
                 >
-                  {isGstEnabled ? 'GST' : 'No GST'}
+                  <X size={16} />
                 </button>
-              </div>
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 8, fontSize: 13.5 }}>
-                <div className="flex justify-between"><span className="text-secondary">Subtotal</span><span>₹{subtotal.toFixed(2)}</span></div>
-                <div className="flex justify-between"><span className="text-secondary">GST</span><span>₹{gstAmount.toFixed(2)}</span></div>
-                <div className="flex justify-between items-center"><span className="text-secondary">Discount</span><input type="number" className="form-input" style={{ width: 80, padding: '3px 8px', textAlign: 'right' }} value={discount} onChange={e => setDiscount(Number(e.target.value) || 0)} min={0} disabled={billSaved} /></div>
-
-              <div style={{ borderTop: '1px solid rgba(0,0,0,0.08)', paddingTop: 8, marginTop: 4 }}><div className="flex justify-between" style={{ fontSize: 18, fontWeight: 700 }}><span>Total</span><span>₹{totalAmount.toFixed(2)}</span></div></div>
+              )}
+              {showCustDropdown && !selectedCustomer && !billSaved && (
+                <div className="autocomplete-dropdown">
+                  {filteredCustomers.slice(0, 8).map((c) => (
+                    <div key={c.id} className="autocomplete-item" onMouseDown={() => { setSelectedCustomer(c); setCustSearch(''); setShowCustDropdown(false); }}>
+                      <span style={{ fontWeight: 500 }}>{c.name}</span>
+                      {c.phone && <span className="text-muted"> · {c.phone}</span>}
+                      {c.credit_balance > 0 && <Badge tone="red" style={{ marginLeft: 6 }}>{money(c.credit_balance)} due</Badge>}
+                    </div>
+                  ))}
+                  {filteredCustomers.length === 0 && (
+                    <div className="autocomplete-item text-muted" style={{ cursor: 'default' }}>No customers found</div>
+                  )}
+                </div>
+              )}
             </div>
-        </div>
-          <div className="flex gap-2" style={{ marginTop: 'auto' }}>
+          </div>
+
+          {/* Doctor */}
+          <div className="glass-card" style={{ position: 'relative', zIndex: 15, padding: '12px 14px' }}>
+            <div className="flex justify-between items-center mb-2">
+              <span className="card-title" style={{ margin: 0 }}>Doctor</span>
+              <Button variant="secondary" size="sm" icon={Stethoscope} onClick={() => setShowNewDoc(true)} disabled={billSaved} title="New doctor" />
+            </div>
+            <div style={{ position: 'relative' }}>
+              <input
+                className="form-input"
+                placeholder="Search doctor…"
+                value={selectedDoctor ? selectedDoctor.name : docSearch}
+                onChange={(e) => { setDocSearch(e.target.value); setSelectedDoctor(null); setShowDocDropdown(true); }}
+                onFocus={() => !billSaved && setShowDocDropdown(true)}
+                onBlur={() => setTimeout(() => setShowDocDropdown(false), 200)}
+                disabled={billSaved}
+              />
+              {selectedDoctor && !billSaved && (
+                <button
+                  type="button"
+                  style={{ position: 'absolute', right: 8, top: 9, background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-muted)' }}
+                  onClick={() => { setSelectedDoctor(null); setDocSearch(''); }}
+                >
+                  <X size={16} />
+                </button>
+              )}
+              {showDocDropdown && !selectedDoctor && !billSaved && (
+                <div className="autocomplete-dropdown">
+                  {filteredDoctors.slice(0, 8).map((d) => (
+                    <div key={d.id} className="autocomplete-item" onMouseDown={() => { setSelectedDoctor(d); setDocSearch(''); setShowDocDropdown(false); }}>
+                      <span style={{ fontWeight: 500 }}>Dr. {d.name}</span>
+                      {d.hospital && <span className="text-muted"> · {d.hospital}</span>}
+                    </div>
+                  ))}
+                  {filteredDoctors.length === 0 && (
+                    <div className="autocomplete-item text-muted" style={{ cursor: 'default' }}>No doctors found</div>
+                  )}
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* Payment mode */}
+          <div className="glass-card" style={{ padding: '12px 14px' }}>
+            <div className="card-title" style={{ marginBottom: 8 }}>Payment Mode</div>
+            <div style={{ display: 'flex', gap: 6 }}>
+              {PAYMENT_MODES.map((mode) => (
+                <Button
+                  key={mode}
+                  size="sm"
+                  variant={paymentMode === mode ? 'primary' : 'secondary'}
+                  onClick={() => !billSaved && setPaymentMode(mode)}
+                  disabled={billSaved}
+                  style={{ flex: 1 }}
+                >
+                  {mode}
+                </Button>
+              ))}
+            </div>
+          </div>
+
+          {/* Bill summary */}
+          <div className="glass-card" style={{ padding: '12px 14px' }}>
+            <div className="flex justify-between items-center mb-2">
+              <span className="card-title" style={{ margin: 0 }}>Bill Summary</span>
+              <Button
+                size="sm"
+                variant={isGstEnabled ? 'primary' : 'secondary'}
+                onClick={() => !billSaved && setIsGstEnabled(!isGstEnabled)}
+                disabled={billSaved}
+                style={{ fontSize: 11, padding: '2px 10px' }}
+              >
+                {isGstEnabled ? 'GST On' : 'GST Off'}
+              </Button>
+            </div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 8, fontSize: 13.5 }}>
+              <div className="flex justify-between"><span className="text-secondary">Taxable</span><span>{money(subtotal)}</span></div>
+              <div className="flex justify-between"><span className="text-secondary">GST (incl.)</span><span>{money(gstAmount)}</span></div>
+              <div className="flex justify-between items-center">
+                <span className="text-secondary">Discount</span>
+                <Input
+                  type="number"
+                  min={0}
+                  value={discount}
+                  disabled={billSaved}
+                  onChange={(e) => setDiscount(Number(e.target.value) || 0)}
+                  style={{ width: 90, padding: '4px 8px', textAlign: 'right' }}
+                />
+              </div>
+              <div style={{ borderTop: '1px solid var(--border)', paddingTop: 8, marginTop: 2 }}>
+                <div className="flex justify-between" style={{ fontSize: 18, fontWeight: 800 }}>
+                  <span>Total</span><span>{money(totalAmount)}</span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* Save / New bill */}
+          <div style={{ display: 'flex', gap: 8, marginTop: 'auto' }}>
             {billSaved ? (
-              <button 
-                ref={newBillBtnRef}
-                className="btn btn-primary" 
-                onClick={resetBilling} 
-                style={{ flex: 1, height: 40, fontSize: 15, fontWeight: 600, border: '2px solid #22c55e' }}
-              >
+              <Button ref={newBillBtnRef} variant="success" onClick={resetBilling} style={{ flex: 1, height: 42, fontSize: 15 }}>
                 {reviewTimer > 0 ? `New Bill (${reviewTimer}s)` : 'New Bill (Enter)'}
-              </button>
+              </Button>
             ) : (
-              <button 
-                className="btn btn-success" 
-                onClick={handleSave} 
-                disabled={saving || items.length === 0} 
-                style={{ flex: 1, height: 40, fontSize: 15, fontWeight: 600 }}
-              >
-                {saving ? 'Saving...' : 'Save Bill (Enter)'}
-              </button>
+              <Button variant="success" onClick={handleSave} loading={saving} disabled={items.length === 0} style={{ flex: 1, height: 42, fontSize: 15 }}>
+                {saving ? 'Saving…' : 'Save Bill (Enter)'}
+              </Button>
             )}
           </div>
 
-        {lastInvoice && (
-          <div className="flex gap-2" style={{ flexWrap: 'wrap' }}>
-            <button className="btn btn-primary btn-sm" onClick={handlePrint} style={{ flex: 1 }}><Printer size={14} fill="currentColor" fillOpacity={0.2}/> Print</button>
-            <button className="btn btn-secondary btn-sm" onClick={handlePDF} style={{ flex: 1 }}><FileText size={14} fill="currentColor" fillOpacity={0.2}/> PDF</button>
-            <button className="btn btn-success btn-sm" onClick={handleWhatsApp} style={{ flex: 1 }} disabled={sendingWhatsApp}>
-              {sendingWhatsApp ? <RefreshCw size={14} className="animate-spin" /> : <Send size={14} fill="currentColor" fillOpacity={0.2} />}
-              WhatsApp
-            </button>
-
-          </div>
-        )}
+          {/* Post-save actions */}
+          {lastInvoice && (
+            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+              <Button variant="primary" size="sm" icon={Printer} onClick={handlePrint} style={{ flex: 1 }}>Print</Button>
+              <Button variant="secondary" size="sm" icon={FileText} onClick={handlePDF} style={{ flex: 1 }}>PDF</Button>
+              <Button variant="success" size="sm" icon={Send} onClick={handleWhatsApp} loading={sendingWhatsApp} style={{ flex: 1 }}>WhatsApp</Button>
+            </div>
+          )}
+        </div>
       </div>
-      {showNewCust && <QuickCustomerModal onClose={() => setShowNewCust(false)} onSave={(c) => { setCustomers(prev => [...prev, c]); setSelectedCustomer(c); setShowNewCust(false); showToast('Customer added'); }} />}
-      {showNewDoc && <QuickDoctorModal onClose={() => setShowNewDoc(false)} onSave={(d) => { setDoctors(prev => [...prev, d]); setSelectedDoctor(d); setShowNewDoc(false); showToast('Doctor added'); }} />}
+
+      {showNewCust && (
+        <QuickCustomerModal
+          onClose={() => setShowNewCust(false)}
+          onSave={(c) => { setCustomers((prev) => [...prev, c]); setSelectedCustomer(c); setShowNewCust(false); showToast('Customer added'); }}
+        />
+      )}
+      {showNewDoc && (
+        <QuickDoctorModal
+          onClose={() => setShowNewDoc(false)}
+          onSave={(d) => { setDoctors((prev) => [...prev, d]); setSelectedDoctor(d); setShowNewDoc(false); showToast('Doctor added'); }}
+        />
+      )}
       {showH1Modal && <H1DetailsModal details={h1Details} setDetails={setH1Details} onClose={() => setShowH1Modal(false)} />}
     </div>
-  </div>
   );
 }
 
+// -------------------------------------------------------------------------
+// Schedule H1 register details (mandatory under the Drugs & Cosmetics Rules).
+// -------------------------------------------------------------------------
 function H1DetailsModal({ details, setDetails, onClose }) {
-  const set = (k, v) => setDetails(prev => ({ ...prev, [k]: v }));
-  
-  return (
-    <div className="modal-overlay" onClick={onClose}>
-      <div className="modal" style={{ maxWidth: 500 }} onClick={e => e.stopPropagation()}>
-        <div className="modal-header">
-          <h2>Schedule H1 Drug Details</h2>
-          <button className="modal-close" onClick={onClose}><X size={18}/></button>
-        </div>
-        <div className="modal-body">
-          <p className="text-muted mb-4" style={{ fontSize: 13 }}>These details are mandatory under Indian Drugs & Cosmetics Rules for Schedule H1 medicines.</p>
-          
-          <div className="form-row">
-            <div className="form-group">
-              <label className="form-label">Patient Name *</label>
-              <input className="form-input" value={details.patient_name} onChange={e => set('patient_name', e.target.value)} />
-            </div>
-          </div>
-          <div className="form-group">
-            <label className="form-label">Patient Address *</label>
-            <input className="form-input" value={details.patient_address} onChange={e => set('patient_address', e.target.value)} />
-          </div>
-          
-          <div className="form-row">
-            <div className="form-group">
-              <label className="form-label">Doctor Name *</label>
-              <input className="form-input" value={details.doctor_name} onChange={e => set('doctor_name', e.target.value)} />
-            </div>
-            <div className="form-group">
-              <label className="form-label">Doctor Reg. No *</label>
-              <input className="form-input" value={details.doctor_reg_no} onChange={e => set('doctor_reg_no', e.target.value)} />
-            </div>
-          </div>
-          <div className="form-group">
-            <label className="form-label">Doctor Address *</label>
-            <input className="form-input" value={details.doctor_address} onChange={e => set('doctor_address', e.target.value)} />
-          </div>
-          
-          <div className="form-row">
-            <div className="form-group">
-              <label className="form-label">Prescription No / ID *</label>
-              <input className="form-input" value={details.prescription_no} onChange={e => set('prescription_no', e.target.value)} />
-            </div>
-          </div>
+  const showToast = useToast();
+  const set = (k, v) => setDetails((prev) => ({ ...prev, [k]: v }));
 
-          <div className="alert alert-yellow" style={{ marginTop: 15, fontSize: 12 }}>
-            <strong>Note:</strong> Records must be maintained for 3 years for government inspection.
-          </div>
-        </div>
-        <div className="modal-footer">
-          <button className="btn btn-primary w-full" onClick={onClose}>Confirm Details</button>
-        </div>
+  const handleSubmit = (e) => {
+    e.preventDefault();
+    if (!details.patient_name?.trim() || !details.doctor_name?.trim() || !details.doctor_reg_no?.trim() || !details.prescription_no?.trim()) {
+      showToast('Please fill patient name, doctor name, doctor reg. no and prescription no.', 'error');
+      return;
+    }
+    onClose();
+  };
+
+  return (
+    <Modal
+      title="Schedule H1 Drug Details"
+      onClose={onClose}
+      size={520}
+      onSubmit={handleSubmit}
+      footer={<Button type="submit" variant="primary" style={{ width: '100%' }}>Confirm Details</Button>}
+    >
+      <p className="text-muted" style={{ fontSize: 13, marginBottom: 14 }}>
+        These details are mandatory under the Indian Drugs &amp; Cosmetics Rules for Schedule H1 medicines.
+      </p>
+      <FormField label="Patient Name" required>
+        <Input value={details.patient_name} onChange={(e) => set('patient_name', e.target.value)} autoFocus />
+      </FormField>
+      <FormField label="Patient Address">
+        <Input value={details.patient_address} onChange={(e) => set('patient_address', e.target.value)} />
+      </FormField>
+      <div className="form-row">
+        <FormField label="Doctor Name" required>
+          <Input value={details.doctor_name} onChange={(e) => set('doctor_name', e.target.value)} />
+        </FormField>
+        <FormField label="Doctor Reg. No" required>
+          <Input value={details.doctor_reg_no} onChange={(e) => set('doctor_reg_no', e.target.value)} />
+        </FormField>
       </div>
-    </div>
+      <FormField label="Doctor Address">
+        <Input value={details.doctor_address} onChange={(e) => set('doctor_address', e.target.value)} />
+      </FormField>
+      <FormField label="Prescription No / ID" required>
+        <Input value={details.prescription_no} onChange={(e) => set('prescription_no', e.target.value)} />
+      </FormField>
+      <div className="alert alert-yellow" style={{ marginTop: 6, fontSize: 12 }}>
+        <strong>Note:</strong> These records must be maintained for 3 years for government inspection.
+      </div>
+    </Modal>
   );
 }
 
+// -------------------------------------------------------------------------
+// Quick-add customer / doctor (inline during billing).
+// -------------------------------------------------------------------------
 function QuickCustomerModal({ onClose, onSave }) {
   const [form, setForm] = useState({ name: '', phone: '', address: '' });
   const [saving, setSaving] = useState(false);
   const showToast = useToast();
+  const set = (k, v) => setForm((p) => ({ ...p, [k]: v }));
+
   const handleSubmit = async (e) => {
     e.preventDefault();
-    if (!form.name.trim()) return showToast('Name required', 'error');
+    if (!form.name.trim()) return showToast('Name is required', 'error');
     setSaving(true);
-    try { const c = await api.createCustomer(form); onSave(c); } catch (err) { showToast(err.message, 'error'); }
-    setSaving(false);
+    try { onSave(await api.createCustomer(form)); }
+    catch (err) { showToast(err.message, 'error'); }
+    finally { setSaving(false); }
   };
-  return (
-    <div className="modal-overlay" onClick={onClose}>
-      <div className="modal" style={{ maxWidth: 400 }} onClick={e => e.stopPropagation()}>
-        <div className="modal-header"><h2>New Customer</h2><button className="modal-close" onClick={onClose}><X size={18}/></button></div>
-        <form onSubmit={handleSubmit}>
-          <div className="modal-body">
 
-          
-            <div className="form-group"><label className="form-label">Name *</label><input className="form-input" value={form.name} onChange={e => setForm(p => ({ ...p, name: e.target.value }))} autoFocus /></div>
-            <div className="form-group"><label className="form-label">Phone</label><input className="form-input" value={form.phone} onChange={e => setForm(p => ({ ...p, phone: e.target.value }))} /></div>
-            <div className="form-group"><label className="form-label">Address</label><input className="form-input" value={form.address} onChange={e => setForm(p => ({ ...p, address: e.target.value }))} /></div>
-          </div>
-          <div className="modal-footer"><button type="button" className="btn btn-secondary" onClick={onClose}>Cancel</button><button type="submit" className="btn btn-primary" disabled={saving}>{saving ? 'Saving...' : 'Add'}</button></div>
-        </form>
-      </div>
-    </div>
+  return (
+    <Modal
+      title="New Customer"
+      onClose={onClose}
+      size={420}
+      onSubmit={handleSubmit}
+      footer={<>
+        <Button variant="secondary" onClick={onClose}>Cancel</Button>
+        <Button type="submit" variant="primary" loading={saving}>Add</Button>
+      </>}
+    >
+      <FormField label="Name" required>
+        <Input value={form.name} onChange={(e) => set('name', e.target.value)} autoFocus />
+      </FormField>
+      <FormField label="Phone">
+        <Input value={form.phone} onChange={(e) => set('phone', e.target.value)} />
+      </FormField>
+      <FormField label="Address">
+        <Input value={form.address} onChange={(e) => set('address', e.target.value)} />
+      </FormField>
+    </Modal>
   );
 }
 
@@ -841,27 +906,40 @@ function QuickDoctorModal({ onClose, onSave }) {
   const [form, setForm] = useState({ name: '', hospital: '', phone: '', specialization: '' });
   const [saving, setSaving] = useState(false);
   const showToast = useToast();
+  const set = (k, v) => setForm((p) => ({ ...p, [k]: v }));
+
   const handleSubmit = async (e) => {
     e.preventDefault();
-    if (!form.name.trim()) return showToast('Name required', 'error');
+    if (!form.name.trim()) return showToast('Name is required', 'error');
     setSaving(true);
-    try { const d = await api.createDoctor(form); onSave(d); } catch (err) { showToast(err.message, 'error'); }
-    setSaving(false);
+    try { onSave(await api.createDoctor(form)); }
+    catch (err) { showToast(err.message, 'error'); }
+    finally { setSaving(false); }
   };
+
   return (
-    <div className="modal-overlay" onClick={onClose}>
-      <div className="modal" style={{ maxWidth: 400 }} onClick={e => e.stopPropagation()}>
-        <div className="modal-header"><h2>New Doctor</h2><button className="modal-close" onClick={onClose}><X size={18}/></button></div>
-        <form onSubmit={handleSubmit}>
-          <div className="modal-body">
-            <div className="form-group"><label className="form-label">Name *</label><input className="form-input" value={form.name} onChange={e => setForm(p => ({ ...p, name: e.target.value }))} autoFocus /></div>
-            <div className="form-group"><label className="form-label">Hospital</label><input className="form-input" value={form.hospital} onChange={e => setForm(p => ({ ...p, hospital: e.target.value }))} /></div>
-            <div className="form-group"><label className="form-label">Phone</label><input className="form-input" value={form.phone} onChange={e => setForm(p => ({ ...p, phone: e.target.value }))} /></div>
-            <div className="form-group"><label className="form-label">Specialization</label><input className="form-input" value={form.specialization} onChange={e => setForm(p => ({ ...p, specialization: e.target.value }))} /></div>
-          </div>
-          <div className="modal-footer"><button type="button" className="btn btn-secondary" onClick={onClose}>Cancel</button><button type="submit" className="btn btn-primary" disabled={saving}>{saving ? 'Saving...' : 'Add'}</button></div>
-        </form>
-      </div>
-    </div>
+    <Modal
+      title="New Doctor"
+      onClose={onClose}
+      size={420}
+      onSubmit={handleSubmit}
+      footer={<>
+        <Button variant="secondary" onClick={onClose}>Cancel</Button>
+        <Button type="submit" variant="primary" loading={saving}>Add</Button>
+      </>}
+    >
+      <FormField label="Name" required>
+        <Input value={form.name} onChange={(e) => set('name', e.target.value)} autoFocus />
+      </FormField>
+      <FormField label="Hospital">
+        <Input value={form.hospital} onChange={(e) => set('hospital', e.target.value)} />
+      </FormField>
+      <FormField label="Phone">
+        <Input value={form.phone} onChange={(e) => set('phone', e.target.value)} />
+      </FormField>
+      <FormField label="Specialization">
+        <Input value={form.specialization} onChange={(e) => set('specialization', e.target.value)} />
+      </FormField>
+    </Modal>
   );
 }

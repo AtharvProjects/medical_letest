@@ -37,7 +37,6 @@ export default function Header({ activePage }) {
       <div className="header-right">
         <div className="trademark-container">
            <div className="trademark-text">{shopName}</div>
-           <div className="trademark-badge">OFFICIAL</div>
         </div>
       </div>
     </header>

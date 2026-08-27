@@ -95,8 +95,8 @@ export default function App() {
 
   if (isLicensed === null) {
     return (
-      <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', minHeight: '100vh', background: '#f5f7fa', color: '#64748b', fontFamily: 'sans-serif' }}>
-        Checking license status...
+      <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', minHeight: '100vh', background: 'var(--bg-primary)', color: 'var(--text-muted)', fontSize: 14, fontFamily: 'Inter, sans-serif' }}>
+        Checking license status…
       </div>
     );
   }
@@ -121,9 +121,9 @@ export default function App() {
         </div>
       </div>
       <ToastContainer toasts={toasts} />
-      {/* Shortcut Hint */}
-        <div style={{ position: 'fixed', bottom: 10, right: 10, fontSize: 10, color: 'rgba(0,0,0,0.3)', pointerEvents: 'none', zIndex: 1000 }}>
-          F1: Dash | F2: Bill | List | F3: Inv | F4: Buy | F5: Cust | F6: Doc | F7: Sup | F8: Rep | F9: Set
+      {/* Keyboard shortcut hint */}
+        <div style={{ position: 'fixed', bottom: 8, left: 12, fontSize: 10.5, color: 'var(--text-muted)', opacity: 0.65, pointerEvents: 'none', zIndex: 1000, fontWeight: 500 }}>
+          F1 Dashboard · F2 Billing · F3 Inventory · F4 Purchases · F5 Customers · F6 Doctors · F7 Suppliers · F8 Reports · F9 Settings
         </div>
     </ToastContext.Provider>
   );

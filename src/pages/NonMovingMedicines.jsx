@@ -1,26 +1,24 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { api } from '../services/api';
 import { useToast } from '../App';
-import { Search, Filter, Trash2, Tag, Download, Archive, X } from 'lucide-react';
+import { Filter, Trash2, Tag, Download, Archive } from 'lucide-react';
 import Fuse from 'fuse.js';
+import { formatDate, money, daysUntil, todayStr } from '../utils/format';
+import {
+  Button, Modal, DataTable, Badge, EmptyState, SearchInput, Select, FormField, Input, ConfirmDialog,
+} from '../components/ui';
 
 export default function NonMovingMedicines() {
+  const showToast = useToast();
   const [medicines, setMedicines] = useState([]);
   const [categories, setCategories] = useState([]);
   const [suppliers, setSuppliers] = useState([]);
-  
-  const [filters, setFilters] = useState({
-    days: 60,
-    category: '',
-    supplier_id: ''
-  });
-  
+  const [filters, setFilters] = useState({ days: 60, category: '', supplier_id: '' });
   const [search, setSearch] = useState('');
   const [loading, setLoading] = useState(true);
-  
   const [discountModal, setDiscountModal] = useState(null);
-  
-  const showToast = useToast();
+  const [confirmTarget, setConfirmTarget] = useState(null);
+  const [writingOff, setWritingOff] = useState(false);
 
   const loadData = useCallback(() => {
     setLoading(true);
@@ -35,32 +33,31 @@ export default function NonMovingMedicines() {
     api.getSuppliers().then(setSuppliers).catch(() => {});
   }, []);
 
-  useEffect(() => {
-    loadDropdowns();
-  }, [loadDropdowns]);
+  useEffect(() => { loadDropdowns(); }, [loadDropdowns]);
+  useEffect(() => { loadData(); }, [loadData]);
 
-  useEffect(() => {
-    loadData();
-  }, [loadData]);
-
-  const fuse = useMemo(() => new Fuse(medicines, {
-    keys: ['medicine_name', 'batch_number', 'supplier_name', 'category'],
-    threshold: 0.3,
-  }), [medicines]);
+  const fuse = useMemo(
+    () => new Fuse(medicines, { keys: ['medicine_name', 'batch_number', 'supplier_name', 'category'], threshold: 0.3 }),
+    [medicines]
+  );
 
   const filteredMedicines = useMemo(() => {
     if (!search.trim()) return medicines;
-    return fuse.search(search).map(r => r.item);
+    return fuse.search(search).map((r) => r.item);
   }, [search, medicines, fuse]);
 
-  const handleWriteOff = async (batchId, batchNumber) => {
-    if (!window.confirm(`Are you sure you want to write-off (set stock to 0) for batch ${batchNumber}? This action cannot be undone.`)) return;
+  const doWriteOff = async () => {
+    if (!confirmTarget) return;
+    setWritingOff(true);
     try {
-      await api.writeOffBatch(batchId);
-      showToast(`Batch ${batchNumber} has been written off successfully.`);
+      await api.writeOffBatch(confirmTarget.batch_id);
+      showToast(`Batch ${confirmTarget.batch_number} has been written off.`);
+      setConfirmTarget(null);
       loadData();
     } catch (err) {
       showToast(err.message, 'error');
+    } finally {
+      setWritingOff(false);
     }
   };
 
@@ -68,7 +65,7 @@ export default function NonMovingMedicines() {
     if (filteredMedicines.length === 0) return showToast('No data to export', 'error');
 
     const headers = ['Medicine Name', 'Category', 'Batch #', 'Supplier', 'Purchase Date', 'Last Sold Date', 'Expiry Date', 'MRP', 'Selling Rate', 'Stock'];
-    const rows = filteredMedicines.map(m => [
+    const rows = filteredMedicines.map((m) => [
       `"${m.medicine_name}"`,
       `"${m.category || ''}"`,
       `"${m.batch_number}"`,
@@ -78,40 +75,36 @@ export default function NonMovingMedicines() {
       `"${m.expiry_date}"`,
       m.mrp,
       m.selling_rate,
-      m.stock
+      m.stock,
     ]);
 
-    const csvContent = [headers.join(','), ...rows.map(r => r.join(','))].join('\n');
-    const fileName = `Non_Moving_Medicines_${new Date().toISOString().split('T')[0]}.csv`;
+    const csvContent = [headers.join(','), ...rows.map((r) => r.join(','))].join('\n');
+    const fileName = `Non_Moving_Medicines_${todayStr()}.csv`;
 
-    // Check if running in Electron
+    // Prefer a real save-to-Downloads when running inside Electron.
     if (window.require) {
       try {
         const fs = window.require('fs');
         const path = window.require('path');
         const os = window.require('os');
         const { shell } = window.require('electron');
-        
-        const homeDir = os.homedir();
-        const downloadsPath = path.join(homeDir, 'Downloads');
-        const filePath = path.join(downloadsPath, fileName);
-        
+
+        const filePath = path.join(os.homedir(), 'Downloads', fileName);
         fs.writeFileSync(filePath, csvContent);
         showToast(`CSV exported to Downloads folder: ${fileName}`, 'success');
         shell.showItemInFolder(filePath);
         return;
       } catch (e) {
         console.error('Electron save error', e);
-        // Fallback to browser download if Electron fails
+        // Fall through to the browser download.
       }
     }
 
-    // Standard Browser Download approach
     const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.href = url;
-    link.download = fileName; // Use .download property for better compatibility
+    link.download = fileName;
     document.body.appendChild(link);
     link.click();
     setTimeout(() => {
@@ -120,156 +113,111 @@ export default function NonMovingMedicines() {
     }, 100);
   };
 
+  const columns = [
+    { header: 'Medicine', render: (m) => <span style={{ fontWeight: 500 }}>{m.medicine_name}</span> },
+    { header: 'Category', render: (m) => <span className="text-secondary">{m.category || '—'}</span> },
+    { header: 'Batch #', render: (m) => <span className="text-secondary">{m.batch_number}</span> },
+    {
+      header: 'Last Sold',
+      render: (m) =>
+        m.last_sold_date
+          ? <Badge tone="blue">{formatDate(m.last_sold_date)}</Badge>
+          : <Badge tone="yellow">Never</Badge>,
+    },
+    {
+      header: 'Expiry',
+      render: (m) => <Badge tone={daysUntil(m.expiry_date) < 0 ? 'red' : 'green'}>{formatDate(m.expiry_date)}</Badge>,
+    },
+    { header: 'Stock', align: 'right', render: (m) => <Badge tone="yellow">{m.stock}</Badge> },
+    { header: 'Supplier', render: (m) => <span className="text-secondary">{m.supplier_name || '—'}</span> },
+    { header: 'Selling', align: 'right', render: (m) => money(m.selling_rate) },
+    {
+      header: 'Actions',
+      align: 'right',
+      width: 96,
+      render: (m) => (
+        <div className="flex justify-end gap-1">
+          <Button variant="ghost" size="sm" icon={Tag} title="Adjust selling rate / apply discount" onClick={() => setDiscountModal(m)} />
+          <Button variant="ghost" size="sm" icon={Trash2} title="Write off stock" onClick={() => setConfirmTarget(m)} style={{ color: 'var(--danger)' }} />
+        </div>
+      ),
+    },
+  ];
+
   return (
     <div>
-      {/* Header and Filters */}
-      <div className="toolbar" style={{ flexWrap: 'wrap', gap: '12px' }}>
-        <div className="toolbar-left" style={{ flexWrap: 'wrap', gap: '12px', flex: 1 }}>
-          <div className="search-box">
-            <Search />
-            <input 
-              className="form-input" 
-              placeholder="Search medicines, batches..." 
-              value={search} 
-              onChange={e => setSearch(e.target.value)} 
-            />
-          </div>
-          
-          <div className="flex gap-2 items-center" style={{ marginLeft: 'auto' }}>
-            <Filter size={18} className="text-secondary" />
-            <select 
-              className="form-select" 
-              value={filters.days} 
-              onChange={e => setFilters({...filters, days: Number(e.target.value)})}
-            >
-              <option value={30}>No sales in 30 days</option>
-              <option value={60}>No sales in 60 days</option>
-              <option value={90}>No sales in 90 days</option>
-              <option value={120}>No sales in 120 days</option>
-              <option value={180}>No sales in 180 days</option>
-            </select>
-
-            <select 
-              className="form-select" 
-              value={filters.category} 
-              onChange={e => setFilters({...filters, category: e.target.value})}
-            >
-              <option value="">All Categories</option>
-              {categories.map(c => <option key={c} value={c}>{c}</option>)}
-            </select>
-
-            <select 
-              className="form-select" 
-              value={filters.supplier_id} 
-              onChange={e => setFilters({...filters, supplier_id: e.target.value})}
-            >
-              <option value="">All Suppliers</option>
-              {suppliers.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
-            </select>
-          </div>
+      <div className="toolbar" style={{ flexWrap: 'wrap', gap: 12 }}>
+        <div style={{ flex: 1, minWidth: 240 }}>
+          <SearchInput value={search} onChange={setSearch} placeholder="Search medicines, batches, suppliers…" />
         </div>
-        
-        <div className="toolbar-right">
-          <button className="btn btn-secondary" onClick={exportCSV}>
-            <Download size={15}/> Export CSV
-          </button>
+
+        <div className="flex items-center gap-2" style={{ flexWrap: 'wrap' }}>
+          <Filter size={16} className="text-muted" />
+          <Select value={filters.days} onChange={(e) => setFilters({ ...filters, days: Number(e.target.value) })}>
+            <option value={30}>No sales in 30 days</option>
+            <option value={60}>No sales in 60 days</option>
+            <option value={90}>No sales in 90 days</option>
+            <option value={120}>No sales in 120 days</option>
+            <option value={180}>No sales in 180 days</option>
+          </Select>
+          <Select value={filters.category} onChange={(e) => setFilters({ ...filters, category: e.target.value })}>
+            <option value="">All Categories</option>
+            {categories.map((c) => <option key={c} value={c}>{c}</option>)}
+          </Select>
+          <Select value={filters.supplier_id} onChange={(e) => setFilters({ ...filters, supplier_id: e.target.value })}>
+            <option value="">All Suppliers</option>
+            {suppliers.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+          </Select>
+          <Button variant="secondary" icon={Download} onClick={exportCSV}>Export CSV</Button>
         </div>
       </div>
 
-      {/* Main Table Content */}
       <div className="glass-card">
-        {loading ? (
-          <p className="text-muted text-center" style={{ padding: 40 }}>Loading data...</p>
-        ) : filteredMedicines.length === 0 ? (
-          <div className="empty-state">
-            <Archive size={40}/>
-            <p>No non-moving medicines found for the selected criteria.</p>
-          </div>
-        ) : (
-          <table className="data-table">
-            <thead>
-              <tr>
-                <th>Medicine Name</th>
-                <th>Category</th>
-                <th>Batch #</th>
-                <th>Last Sold</th>
-                <th>Expiry</th>
-                <th>Stock</th>
-                <th>Supplier</th>
-                <th>Selling (₹)</th>
-                <th>Actions</th>
-              </tr>
-            </thead>
-            <tbody>
-              {filteredMedicines.map(m => {
-                // Ensure nice rendering formating
-                const lastSoldRaw = m.last_sold_date ? m.last_sold_date.split(' ')[0] : 'Never';
-                const isExpired = new Date(m.expiry_date) < new Date();
-                
-                return (
-                  <tr key={m.batch_id}>
-                    <td style={{ fontWeight: 500 }}>{m.medicine_name}</td>
-                    <td className="text-secondary">{m.category || '-'}</td>
-                    <td className="text-secondary">{m.batch_number}</td>
-                    <td>
-                      <span className={`badge ${lastSoldRaw === 'Never' ? 'badge-yellow' : 'badge-blue'}`}>
-                        {lastSoldRaw}
-                      </span>
-                    </td>
-                    <td>
-                      <span className={`badge ${isExpired ? 'badge-red' : 'badge-green'}`}>
-                        {m.expiry_date}
-                      </span>
-                    </td>
-                    <td><span className="badge badge-yellow">{m.stock}</span></td>
-                    <td className="text-secondary">{m.supplier_name || '-'}</td>
-                    <td>{m.selling_rate}</td>
-                    <td>
-                      <div className="flex gap-2">
-                        <button 
-                          title="Apply Discount / Change Selling Rate"
-                          className="btn btn-primary btn-sm" 
-                          onClick={() => setDiscountModal(m)}
-                        >
-                          <Tag size={13}/>
-                        </button>
-                        <button 
-                          title="Write-off Stock"
-                          className="btn btn-danger btn-sm" 
-                          onClick={() => handleWriteOff(m.batch_id, m.batch_number)}
-                        >
-                          <Trash2 size={13}/>
-                        </button>
-                      </div>
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        )}
+        <DataTable
+          loading={loading}
+          columns={columns}
+          rows={filteredMedicines}
+          rowKey={(m) => m.batch_id}
+          empty={
+            <EmptyState
+              icon={Archive}
+              title="No non-moving medicines"
+              message="Nothing matches the selected period and filters — that's a good sign for stock rotation."
+            />
+          }
+        />
       </div>
 
-      {/* Discount Modal */}
       {discountModal && (
-        <DiscountModal 
-          medicine={discountModal} 
-          onClose={() => setDiscountModal(null)} 
-          onSave={() => {
+        <DiscountModal
+          medicine={discountModal}
+          onClose={() => setDiscountModal(null)}
+          onSaved={() => {
             setDiscountModal(null);
             loadData();
             showToast('Selling rate updated successfully.');
-          }} 
+          }}
+        />
+      )}
+
+      {confirmTarget && (
+        <ConfirmDialog
+          title="Write off this stock?"
+          message={`Set stock to 0 for batch ${confirmTarget.batch_number} of ${confirmTarget.medicine_name}? This cannot be undone.`}
+          confirmLabel="Write Off"
+          loading={writingOff}
+          onConfirm={doWriteOff}
+          onClose={() => setConfirmTarget(null)}
         />
       )}
     </div>
   );
 }
 
-function DiscountModal({ medicine, onClose, onSave }) {
+function DiscountModal({ medicine, onClose, onSaved }) {
+  const showToast = useToast();
   const [sellingRate, setSellingRate] = useState(medicine.selling_rate);
   const [saving, setSaving] = useState(false);
-  const showToast = useToast();
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -279,7 +227,7 @@ function DiscountModal({ medicine, onClose, onSave }) {
     setSaving(true);
     try {
       await api.discountBatch(medicine.batch_id, Number(sellingRate));
-      onSave();
+      onSaved();
     } catch (err) {
       showToast(err.message, 'error');
     } finally {
@@ -287,49 +235,44 @@ function DiscountModal({ medicine, onClose, onSave }) {
     }
   };
 
-  const discountPercent = ((medicine.mrp - sellingRate) / medicine.mrp * 100).toFixed(1);
+  const rate = parseFloat(sellingRate);
+  const showDiscount = medicine.mrp > 0 && rate > 0;
+  const discountPercent = showDiscount ? (((medicine.mrp - rate) / medicine.mrp) * 100).toFixed(1) : null;
 
   return (
-    <div className="modal-overlay" onClick={onClose}>
-      <div className="modal" onClick={e => e.stopPropagation()}>
-        <div className="modal-header">
-          <h2>Apply Discount / Price Adjust</h2>
-          <button className="modal-close" onClick={onClose}><X size={18}/></button>
-        </div>
-        <form onSubmit={handleSubmit}>
-          <div className="modal-body">
-            <div className="mb-4" style={{ padding: 12, background: 'rgba(0,123,255,0.05)', borderRadius: 6, fontSize: 13, color: 'var(--text-secondary)' }}>
-              <p><strong>Medicine:</strong> {medicine.medicine_name}</p>
-              <p><strong>Batch:</strong> {medicine.batch_number} (Stock: {medicine.stock})</p>
-              <p><strong>MRP:</strong> ₹{medicine.mrp} | <strong>Current Selling Rate:</strong> ₹{medicine.selling_rate}</p>
-            </div>
-            
-            <div className="form-group">
-              <label className="form-label">New Selling Rate (₹) *</label>
-              <input 
-                type="number" 
-                step="0.01" 
-                className="form-input" 
-                value={sellingRate} 
-                onChange={e => setSellingRate(e.target.value)} 
-                autoFocus 
-              />
-            </div>
-
-            {medicine.mrp > 0 && sellingRate > 0 && (
-              <div className="text-secondary" style={{ fontSize: 13, marginTop: 8 }}>
-                Effective Discount: <strong className={discountPercent > 0 ? 'text-green' : 'text-red'}>{discountPercent}%</strong> off MRP
-              </div>
-            )}
-          </div>
-          <div className="modal-footer">
-            <button type="button" className="btn btn-secondary" onClick={onClose}>Cancel</button>
-            <button type="submit" className="btn btn-primary" disabled={saving}>
-              {saving ? 'Updating...' : 'Update Price'}
-            </button>
-          </div>
-        </form>
+    <Modal
+      title="Apply Discount / Price Adjustment"
+      onClose={onClose}
+      onSubmit={handleSubmit}
+      size={460}
+      footer={
+        <>
+          <Button variant="secondary" onClick={onClose}>Cancel</Button>
+          <Button type="submit" variant="primary" loading={saving}>{saving ? 'Updating…' : 'Update Price'}</Button>
+        </>
+      }
+    >
+      <div
+        style={{
+          padding: 12, background: 'var(--primary-bg)', borderRadius: 'var(--radius-md)',
+          fontSize: 13, color: 'var(--text-secondary)', lineHeight: 1.8, marginBottom: 16,
+        }}
+      >
+        <div><strong>Medicine:</strong> {medicine.medicine_name}</div>
+        <div><strong>Batch:</strong> {medicine.batch_number} (Stock: {medicine.stock})</div>
+        <div><strong>MRP:</strong> {money(medicine.mrp)} · <strong>Current Selling:</strong> {money(medicine.selling_rate)}</div>
       </div>
-    </div>
+
+      <FormField label="New Selling Rate (₹)" required>
+        <Input type="number" step="0.01" min="0" value={sellingRate} onChange={(e) => setSellingRate(e.target.value)} autoFocus />
+      </FormField>
+
+      {showDiscount && (
+        <div className="text-secondary" style={{ fontSize: 13, marginTop: 4 }}>
+          Effective discount:{' '}
+          <strong style={{ color: discountPercent > 0 ? 'var(--success)' : 'var(--danger)' }}>{discountPercent}%</strong> off MRP
+        </div>
+      )}
+    </Modal>
   );
 }

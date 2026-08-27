@@ -5,8 +5,15 @@ const db = require('./db');
 const { initWhatsApp } = require('./whatsapp');
 const { encrypt, decrypt } = require('./encryption');
 
-const { createBackup, listBackups, deleteBackup } = require('./backup');
+const { createBackup, maybeAutoBackup, listBackups, deleteBackup } = require('./backup');
+const { splitInclusive, round2, perUnitCost } = require('./money');
 const { logAction } = require('./audit');
+
+// Per-line COGS as a SQL expression, shared by every profit/margin query so the
+// costing stays identical everywhere. `ii`=invoice_items, `b`=batches, `m`=medicines.
+// purchase_rate is per STRIP; for tablet-like categories divide it by the strip
+// size (prefer the tps captured on the sale row) to get the true per-unit cost.
+const LINE_COGS_SQL = `(ii.quantity * (b.purchase_rate / CASE WHEN m.unit_category IN ('Tablet','Capsule','Strip') THEN COALESCE(NULLIF(ii.tablets_per_strip,0), NULLIF(m.tablets_per_strip,0), 1) ELSE 1 END))`;
 
 const app = express();
 app.use(cors());
@@ -86,9 +93,10 @@ app.post('/api/license/activate', (req, res) => {
 // Initialize WhatsApp
 initWhatsApp(app);
 
-// Automatic Startup Backup
-createBackup('Auto').then(res => {
-  console.log('Auto-backup created:', res.filename);
+// Automatic Startup Backup (throttled + pruned so the folder can't grow unbounded)
+maybeAutoBackup().then(res => {
+  if (res && res.skipped) console.log('Auto-backup skipped:', res.reason);
+  else if (res && res.filename) console.log('Auto-backup created:', res.filename);
 }).catch(err => {
   console.error('Auto-backup failed:', err);
 });
@@ -153,8 +161,16 @@ app.get('/api/audit-logs', (req, res) => {
 // ============ DASHBOARD ============
 app.get('/api/dashboard', (req, res) => {
   try {
-    const today = new Date().toISOString().slice(0, 10);
+    // Use the LOCAL calendar day/month — invoices store created_at via
+    // datetime('now','localtime'), so a UTC "today" was wrong before ~05:30 IST.
+    const today = db.prepare("SELECT date('now','localtime') as d").get().d;
     const monthStart = today.slice(0, 8) + '01';
+
+    // Alert thresholds come from Settings (fall back to sane defaults).
+    const lowStockRow = db.prepare("SELECT value FROM settings WHERE key='low_stock_threshold'").get();
+    const lowStockThreshold = lowStockRow && !isNaN(parseInt(lowStockRow.value, 10)) ? parseInt(lowStockRow.value, 10) : 10;
+    const expiryRow = db.prepare("SELECT value FROM settings WHERE key='expiry_alert_days'").get();
+    const expiryDays = expiryRow && !isNaN(parseInt(expiryRow.value, 10)) ? parseInt(expiryRow.value, 10) : 90;
 
     // Today's stats
     const todayStats = db.prepare(`
@@ -178,26 +194,38 @@ app.get('/api/dashboard', (req, res) => {
       WHERE date(purchase_date) >= ?
     `).get(monthStart);
 
-    // Low stock (total stock <= 30 across all batches)
+    // Real gross profit for the month = net (ex-GST) revenue of items sold − their COGS.
+    // This is a true margin, not the sales−purchases cashflow it used to show (a big
+    // restock month would otherwise look like a loss).
+    const monthlyProfit = db.prepare(`
+      SELECT COALESCE(SUM(ii.total) - SUM(${LINE_COGS_SQL}), 0) as total
+      FROM invoices i
+      JOIN invoice_items ii ON ii.invoice_id = i.id
+      JOIN batches b ON b.id = ii.batch_id
+      JOIN medicines m ON m.id = ii.medicine_id
+      WHERE date(i.created_at) >= ?
+    `).get(monthStart);
+
+    // Low stock (total stock at or below the configured threshold, across all batches)
     const lowStock = db.prepare(`
       SELECT m.brand_name, m.company_name, COALESCE(SUM(b.quantity),0) as total_stock
       FROM medicines m
       LEFT JOIN batches b ON b.medicine_id = m.id
       WHERE m.is_active = 1
       GROUP BY m.id
-      HAVING total_stock <= 30
+      HAVING total_stock <= ?
       ORDER BY total_stock ASC
       LIMIT 10
-    `).all();
+    `).all(lowStockThreshold);
 
-    // Expiring within 90 days
+    // Expiring within the configured alert window (expiry_alert_days)
     const expiring = db.prepare(`
       SELECT m.brand_name, b.batch_number, b.expiry_date, b.quantity
       FROM batches b JOIN medicines m ON m.id = b.medicine_id
-      WHERE b.quantity > 0 AND b.expiry_date <= date('now', '+90 days')
+      WHERE b.quantity > 0 AND b.expiry_date <= date('now', 'localtime', '+' || ? || ' days')
       ORDER BY b.expiry_date ASC
       LIMIT 10
-    `).all();
+    `).all(expiryDays);
 
     // Fast moving (last 30 days)
     const fastMoving = db.prepare(`
@@ -205,7 +233,7 @@ app.get('/api/dashboard', (req, res) => {
       FROM invoice_items ii
       JOIN medicines m ON ii.medicine_id = m.id
       JOIN invoices i ON ii.invoice_id = i.id
-      WHERE date(i.created_at) >= date('now', '-30 days')
+      WHERE date(i.created_at) >= date('now', 'localtime', '-30 days')
       GROUP BY m.id
       ORDER BY total_sold DESC
       LIMIT 8
@@ -219,7 +247,7 @@ app.get('/api/dashboard', (req, res) => {
     `).all();
 
     // Total outstanding credit
-    const outstanding = db.prepare(`SELECT COALESCE(SUM(credit_balance),0) as total FROM customers`).get();
+    const outstanding = db.prepare(`SELECT COALESCE(SUM(credit_balance),0) as total FROM customers WHERE credit_balance > 0`).get();
 
     res.json({
       today: {
@@ -232,7 +260,7 @@ app.get('/api/dashboard', (req, res) => {
       monthly: {
         sales: monthlySales.total,
         purchases: monthlyPurchases.total,
-        profit: monthlySales.total - monthlyPurchases.total
+        profit: monthlyProfit.total
       },
       lowStock,
       expiring,
@@ -262,13 +290,16 @@ app.get('/api/reports/gst', (req, res) => {
     `).all(from, to);
 
     const breakup = db.prepare(`
-      SELECT gst_percent, 
-             SUM(invoice_items.total) as taxable_value,
-             SUM(invoice_items.gst_amount) as gst_amount
+      SELECT invoice_items.gst_percent AS gst_percent,
+             ROUND(SUM(invoice_items.total), 2) as taxable_value,
+             ROUND(SUM(CASE WHEN invoices.is_interstate = 1 THEN 0 ELSE invoice_items.gst_amount / 2 END), 2) as cgst,
+             ROUND(SUM(CASE WHEN invoices.is_interstate = 1 THEN 0 ELSE invoice_items.gst_amount / 2 END), 2) as sgst,
+             ROUND(SUM(CASE WHEN invoices.is_interstate = 1 THEN invoice_items.gst_amount ELSE 0 END), 2) as igst,
+             ROUND(SUM(invoice_items.gst_amount), 2) as gst_amount
       FROM invoice_items
       JOIN invoices ON invoices.id = invoice_items.invoice_id
       WHERE date(invoices.created_at) BETWEEN ? AND ?
-      GROUP BY gst_percent
+      GROUP BY invoice_items.gst_percent
     `).all(from, to);
 
     res.json({ sales, breakup });
@@ -308,9 +339,10 @@ app.get('/api/reports/low-stock', (req, res) => {
   const { threshold = 10 } = req.query;
   try {
     const data = db.prepare(`
-      SELECT m.brand_name, m.company_name, m.unit_category, SUM(b.quantity) as total_stock
+      SELECT m.brand_name, m.company_name, m.unit_category, COALESCE(SUM(b.quantity), 0) as total_stock
       FROM medicines m
-      JOIN batches b ON b.medicine_id = m.id
+      LEFT JOIN batches b ON b.medicine_id = m.id
+      WHERE m.is_active = 1
       GROUP BY m.id
       HAVING total_stock <= ?
       ORDER BY total_stock ASC
@@ -368,11 +400,12 @@ app.get('/api/reports/profit', (req, res) => {
   try {
     const rows = db.prepare(`
       SELECT date(i.created_at) as date,
-             SUM(i.total_amount) as revenue,
-             SUM(ii.quantity * b.purchase_rate) as cost
+             SUM(ii.total) as revenue,
+             SUM(${LINE_COGS_SQL}) as cost
       FROM invoices i
       JOIN invoice_items ii ON ii.invoice_id = i.id
       JOIN batches b ON b.id = ii.batch_id
+      JOIN medicines m ON m.id = ii.medicine_id
       WHERE date(i.created_at) BETWEEN ? AND ?
       GROUP BY date(i.created_at)
       ORDER BY date ASC
@@ -387,7 +420,7 @@ app.get('/api/reports/outstanding', (req, res) => {
       SELECT c.id, c.name, c.phone, c.credit_balance as outstanding,
              COUNT(i.id) as invoice_count
       FROM customers c
-      LEFT JOIN invoices i ON i.customer_id = c.id AND LOWER(TRIM(i.payment_mode)) = 'pending'
+      LEFT JOIN invoices i ON i.customer_id = c.id AND LOWER(TRIM(i.payment_mode)) IN ('pending','udhaari')
       WHERE c.credit_balance > 0
       GROUP BY c.id
       ORDER BY c.credit_balance DESC
@@ -398,21 +431,29 @@ app.get('/api/reports/outstanding', (req, res) => {
 
 app.get('/api/reports/daily-chart', (req, res) => {
   try {
+    // Zero-filled last 7 local days so the dashboard chart has no gaps.
     const rows = db.prepare(`
-      SELECT date(created_at) as date, SUM(total_amount) as total
-      FROM invoices
-      WHERE date(created_at) >= date('now', '-7 days')
-      GROUP BY date(created_at)
-      ORDER BY date ASC
+      WITH RECURSIVE dates(d) AS (
+        SELECT date('now', 'localtime', '-6 days')
+        UNION ALL
+        SELECT date(d, '+1 day') FROM dates WHERE d < date('now', 'localtime')
+      )
+      SELECT dates.d as date,
+             COALESCE(SUM(i.total_amount), 0) as total,
+             COUNT(i.id) as count
+      FROM dates
+      LEFT JOIN invoices i ON date(i.created_at) = dates.d
+      GROUP BY dates.d
+      ORDER BY dates.d ASC
     `).all();
     res.json(rows);
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 app.get('/api/reports/h1-register', (req, res) => {
-  const { from, to } = req.query;
+  const { from, to, medicine_search, doctor_search, patient_search } = req.query;
   try {
-    const data = db.prepare(`
+    let query = `
       SELECT i.invoice_number, i.created_at, h1.patient_name, h1.doctor_name,
              h1.doctor_reg_no, m.brand_name, it.quantity
       FROM invoice_h1_details h1
@@ -420,9 +461,13 @@ app.get('/api/reports/h1-register', (req, res) => {
       JOIN invoice_items it ON it.invoice_id = i.id
       JOIN medicines m ON m.id = it.medicine_id
       WHERE m.is_h1 = 1 AND date(i.created_at) BETWEEN ? AND ?
-      ORDER BY i.created_at DESC
-    `).all(from || '2020-01-01', to || new Date().toISOString().slice(0,10));
-    res.json(data);
+    `;
+    const params = [from || '2020-01-01', to || db.prepare("SELECT date('now','localtime') as d").get().d];
+    if (medicine_search) { query += ' AND m.brand_name LIKE ?'; params.push(`%${medicine_search}%`); }
+    if (doctor_search) { query += ' AND h1.doctor_name LIKE ?'; params.push(`%${doctor_search}%`); }
+    if (patient_search) { query += ' AND h1.patient_name LIKE ?'; params.push(`%${patient_search}%`); }
+    query += ' ORDER BY i.created_at DESC';
+    res.json(db.prepare(query).all(...params));
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
@@ -740,24 +785,24 @@ app.get('/api/customers/:id', (req, res) => {
 });
 
 app.post('/api/customers', (req, res) => {
-  const { name, phone, address, credit_balance, last_payment_mode } = req.body;
+  const { name, phone, address, state, credit_balance, last_payment_mode } = req.body;
   if (!name) return res.status(400).json({ error: 'Name is required' });
   try {
     const encPhone   = encrypt(phone || '');
     const encAddress = encrypt(address || '');
-    const result = db.prepare('INSERT INTO customers (name, phone, address, credit_balance, last_payment_mode) VALUES (?, ?, ?, ?, ?)').run(name, encPhone, encAddress, credit_balance || 0, last_payment_mode || 'Cash');
-    res.json({ id: result.lastInsertRowid, name, phone: phone || '', address: address || '', credit_balance: credit_balance || 0, last_payment_mode: last_payment_mode || 'Cash' });
+    const result = db.prepare('INSERT INTO customers (name, phone, address, state, credit_balance, last_payment_mode) VALUES (?, ?, ?, ?, ?, ?)').run(name, encPhone, encAddress, state || '', credit_balance || 0, last_payment_mode || 'Cash');
+    res.json({ id: result.lastInsertRowid, name, phone: phone || '', address: address || '', state: state || '', credit_balance: credit_balance || 0, last_payment_mode: last_payment_mode || 'Cash' });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
 app.put('/api/customers/:id', (req, res) => {
-  const { name, phone, address, credit_balance, last_payment_mode } = req.body;
+  const { name, phone, address, state, credit_balance, last_payment_mode } = req.body;
   try {
     const encPhone   = encrypt(phone || '');
     const encAddress = encrypt(address || '');
-    db.prepare(`UPDATE customers SET name=?, phone=?, address=?, credit_balance=?, last_payment_mode=?, updated_at=datetime('now','localtime') WHERE id=?`).run(name, encPhone, encAddress, credit_balance || 0, last_payment_mode || 'Cash', req.params.id);
+    db.prepare(`UPDATE customers SET name=?, phone=?, address=?, state=?, credit_balance=?, last_payment_mode=?, updated_at=datetime('now','localtime') WHERE id=?`).run(name, encPhone, encAddress, state || '', credit_balance || 0, last_payment_mode || 'Cash', req.params.id);
     res.json({ success: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -895,7 +940,7 @@ app.get('/api/invoices', (req, res) => {
       const invRaw = db.prepare(`SELECT i.*, c.name as customer_name, c.phone as customer_phone, d.name as doctor_name, d.hospital as doctor_hospital
         FROM invoices i LEFT JOIN customers c ON i.customer_id = c.id LEFT JOIN doctors d ON i.doctor_id = d.id WHERE i.id = ?`).get(req.params.id);
       if (!invRaw) return res.status(404).json({ error: 'Not found' });
-      const items = db.prepare(`SELECT ii.*, m.brand_name, m.company_name, m.unit_category, COALESCE(ii.tablets_per_strip, m.tablets_per_strip, 10) as tablets_per_strip, b.batch_number, b.expiry_date, b.mfg_date
+      const items = db.prepare(`SELECT ii.*, m.brand_name, m.company_name, m.unit_category, m.hsn_code, COALESCE(ii.tablets_per_strip, m.tablets_per_strip, 10) as tablets_per_strip, b.batch_number, b.expiry_date, b.mfg_date
         FROM invoice_items ii JOIN medicines m ON ii.medicine_id = m.id JOIN batches b ON ii.batch_id = b.id WHERE ii.invoice_id = ?`).all(req.params.id);
       const h1_details = db.prepare(`SELECT * FROM invoice_h1_details WHERE invoice_id = ?`).get(req.params.id);
       const inv = decryptInvoiceCustomerFields(invRaw);
@@ -918,40 +963,72 @@ function getNextInvoiceNumber() {
   
     const txn = db.transaction(() => {
       const invoice_number = getNextInvoiceNumber();
+      const todayStr = db.prepare("SELECT date('now','localtime') as d").get().d;
       let subtotal = 0;
       let gst_total = 0;
-  
-      // 1. Validate stock and calculate authoritative totals
+
+      // Track cumulative quantity requested per batch so two lines drawing from
+      // the SAME batch can't each pass validation and then drive stock negative.
+      const requestedPerBatch = new Map();
+
+      // 1. Validate stock/expiry and calculate authoritative totals.
       const processedItems = items.map(item => {
         const batch = db.prepare('SELECT * FROM batches WHERE id = ?').get(item.batch_id);
         if (!batch) throw new Error(`Batch ${item.batch_id} not found`);
-        if (batch.quantity < item.quantity) {
-          throw new Error(`Insufficient stock for batch ${item.batch_number}. Available: ${batch.quantity}, Requested: ${item.quantity}`);
+
+        // Never dispense expired stock.
+        if (batch.expiry_date && batch.expiry_date < todayStr) {
+          throw new Error(`Cannot sell ${item.batch_number || 'batch'}: expired on ${batch.expiry_date}`);
         }
 
-        const price = item.unit_price || batch.selling_rate;
-        const disc = item.discount_percent || 0;
-        const lineTotal = item.quantity * price * (1 - disc / 100);
-        
-        // Use 0 if GST is explicitly disabled for the invoice
-        const gstPct = (is_gst_enabled !== false) ? (item.gst_percent !== undefined ? item.gst_percent : 12) : 0;
-        const lineGst = (lineTotal * gstPct) / 100;
-        
-        subtotal += lineTotal;
-        gst_total += lineGst;
+        const already = requestedPerBatch.get(item.batch_id) || 0;
+        const cumulative = already + (Number(item.quantity) || 0);
+        if (batch.quantity < cumulative) {
+          throw new Error(`Insufficient stock for batch ${item.batch_number}. Available: ${batch.quantity}, Requested: ${cumulative}`);
+        }
+        requestedPerBatch.set(item.batch_id, cumulative);
 
-        return { ...item, price, mrp: batch.mrp, gstPct, lineGst, lineTotal };
+        // unit_price from the client is the tax-INCLUSIVE per-unit SELLING price
+        // (the batch selling rate, falling back to MRP when none is set).
+        // Respect an explicit 0 (what the cashier saw); only fall back when it's absent.
+        const price = (item.unit_price !== undefined && item.unit_price !== null) ? item.unit_price : batch.selling_rate;
+        const disc = item.discount_percent || 0;
+        const gross = item.quantity * price * (1 - disc / 100);
+
+        // GST is INCLUSIVE: extract the tax contained in the line, don't add it on top.
+        const gstPct = (is_gst_enabled !== false) ? (item.gst_percent !== undefined ? item.gst_percent : 12) : 0;
+        const { taxable, gst } = splitInclusive(gross, gstPct);
+
+        subtotal += taxable;
+        gst_total += gst;
+
+        // lineTotal holds the per-line TAXABLE base (stored as invoice_items.total,
+        // which the GST report sums as taxable_value); lineGst is the per-line tax.
+        return { ...item, price, mrp: batch.mrp, gstPct, lineGst: gst, lineTotal: taxable };
       });
-  
-      const total_amount = Math.round((subtotal + gst_total - (discount_amount || 0)) * 100) / 100;
+
+      subtotal = round2(subtotal);
+      gst_total = round2(gst_total);
+      const total_amount = Math.max(0, round2(subtotal + gst_total - (discount_amount || 0)));
       const isCredit = payment_mode && ['pending', 'udhaari'].includes(payment_mode.toLowerCase().trim());
       const paid = amount_paid !== undefined ? amount_paid : (isCredit ? 0 : total_amount);
       const credit = Math.max(0, total_amount - paid);
-  
+
+      // Place of supply → GST split: same state = CGST+SGST (intra), different = IGST (inter).
+      // Server is authoritative; defaults to intra-state whenever either state is unknown,
+      // so the GST total is never affected — only how it is labelled/split on the invoice.
+      let is_interstate = 0;
+      const shopState = (db.prepare("SELECT value FROM settings WHERE key = 'shop_state'").get()?.value || '').trim().toLowerCase();
+      if (customer_id && shopState) {
+        const custRow = db.prepare('SELECT state FROM customers WHERE id = ?').get(customer_id);
+        const custState = (custRow?.state || '').trim().toLowerCase();
+        if (custState && custState !== shopState) is_interstate = 1;
+      }
+
       const invResult = db.prepare(
-        `INSERT INTO invoices (invoice_number, customer_id, doctor_id, subtotal, discount_amount, gst_amount, total_amount, payment_mode, amount_paid, credit_amount, notes)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-      ).run(invoice_number, customer_id || null, doctor_id || null, subtotal, discount_amount || 0, gst_total, total_amount, payment_mode || 'Cash', paid, credit, notes || '');
+        `INSERT INTO invoices (invoice_number, customer_id, doctor_id, subtotal, discount_amount, gst_amount, total_amount, payment_mode, amount_paid, credit_amount, notes, is_interstate)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      ).run(invoice_number, customer_id || null, doctor_id || null, subtotal, discount_amount || 0, gst_total, total_amount, payment_mode || 'Cash', paid, credit, notes || '', is_interstate);
   
       const invoiceId = invResult.lastInsertRowid;
   
@@ -995,7 +1072,7 @@ function getNextInvoiceNumber() {
       // Return the full invoice object
       const invRaw = db.prepare(`SELECT i.*, c.name as customer_name, c.phone as customer_phone, d.name as doctor_name, d.hospital as doctor_hospital
         FROM invoices i LEFT JOIN customers c ON i.customer_id = c.id LEFT JOIN doctors d ON i.doctor_id = d.id WHERE i.id = ?`).get(invoiceId);
-      const invItems = db.prepare(`SELECT ii.*, m.brand_name, m.company_name, m.unit_category, COALESCE(ii.tablets_per_strip, m.tablets_per_strip, 10) as tablets_per_strip, b.batch_number, b.expiry_date, b.mfg_date
+      const invItems = db.prepare(`SELECT ii.*, m.brand_name, m.company_name, m.unit_category, m.hsn_code, COALESCE(ii.tablets_per_strip, m.tablets_per_strip, 10) as tablets_per_strip, b.batch_number, b.expiry_date, b.mfg_date
         FROM invoice_items ii JOIN medicines m ON ii.medicine_id = m.id JOIN batches b ON ii.batch_id = b.id WHERE ii.invoice_id = ?`).all(invoiceId);
       const savedH1Details = db.prepare(`SELECT * FROM invoice_h1_details WHERE invoice_id = ?`).get(invoiceId);
 
@@ -1065,13 +1142,15 @@ app.post('/api/purchases', (req, res) => {
 
   try {
     const txn = db.transaction(() => {
-      // 0. Preliminary existence checks to provide better error messages
+      // 0. Preliminary existence checks; also cache unit/strip info for costing.
       const supplier = db.prepare('SELECT id FROM suppliers WHERE id = ?').get(supplier_id);
       if (!supplier) throw new Error(`Supplier with ID ${supplier_id} not found. It may have been deleted.`);
 
+      const medInfo = new Map();
       for (const item of items) {
-        const med = db.prepare('SELECT brand_name FROM medicines WHERE id = ?').get(item.medicine_id);
+        const med = db.prepare('SELECT id, unit_category, tablets_per_strip FROM medicines WHERE id = ?').get(item.medicine_id);
         if (!med) throw new Error(`Medicine at row ${items.indexOf(item)+1} not found in inventory. Please remove and re-add it.`);
+        medInfo.set(item.medicine_id, med);
       }
 
       let total = 0;
@@ -1088,7 +1167,10 @@ app.post('/api/purchases', (req, res) => {
         ).run(item.medicine_id, item.batch_number, item.mfg_date || '', item.expiry_date, item.purchase_rate, item.selling_rate || 0, item.mrp || 0, item.quantity, supplier_id);
 
         const batchId = batchResult.lastInsertRowid;
-        const lineTotal = item.quantity * item.purchase_rate;
+        // purchase_rate is per STRIP; quantity is in individual units/tablets.
+        // Real cost divides the strip rate across its tablets (tablet-like only).
+        const med = medInfo.get(item.medicine_id) || {};
+        const lineTotal = item.quantity * perUnitCost(item.purchase_rate, med.unit_category, med.tablets_per_strip);
         total += lineTotal;
 
         db.prepare(
@@ -1097,6 +1179,7 @@ app.post('/api/purchases', (req, res) => {
         ).run(purchaseId, item.medicine_id, batchId, item.quantity, item.purchase_rate, item.selling_rate || 0, item.mrp || 0);
       }
 
+      total = round2(total);
       db.prepare('UPDATE purchases SET total_amount = ? WHERE id = ?').run(total, purchaseId);
 
       // If payment was made at the time of purchase, log it in supplier_payments
@@ -1133,9 +1216,11 @@ app.put('/api/purchases/:id', (req, res) => {
       const supplier = db.prepare('SELECT id FROM suppliers WHERE id = ?').get(supplier_id);
       if (!supplier) throw new Error(`Supplier with ID ${supplier_id} not found.`);
 
+      const medInfo = new Map();
       for (const item of items) {
-        const med = db.prepare('SELECT brand_name FROM medicines WHERE id = ?').get(item.medicine_id);
+        const med = db.prepare('SELECT id, unit_category, tablets_per_strip FROM medicines WHERE id = ?').get(item.medicine_id);
         if (!med) throw new Error(`Medicine '${item.medicine_name}' not found in inventory.`);
+        medInfo.set(item.medicine_id, med);
       }
 
       // 1. Fetch current purchase items
@@ -1176,7 +1261,8 @@ app.put('/api/purchases/:id', (req, res) => {
              VALUES (?, ?, ?, ?, ?, ?, ?)`
           ).run(purchaseId, item.medicine_id, batchId, item.quantity, item.purchase_rate, item.selling_rate || 0, item.mrp || 0);
 
-          total += (item.quantity * item.purchase_rate);
+          const medNew = medInfo.get(item.medicine_id) || {};
+          total += item.quantity * perUnitCost(item.purchase_rate, medNew.unit_category, medNew.tablets_per_strip);
         } else {
           // Updating an existing item
           const oldItem = existingMap.get(item.batch_id);
@@ -1199,12 +1285,14 @@ app.put('/api/purchases/:id', (req, res) => {
               `UPDATE purchase_items SET quantity=?, purchase_rate=?, selling_rate=?, mrp=? WHERE purchase_id=? AND batch_id=?`
             ).run(item.quantity, item.purchase_rate, item.selling_rate || 0, item.mrp || 0, purchaseId, item.batch_id);
 
-            total += (item.quantity * item.purchase_rate);
+            const medUpd = medInfo.get(item.medicine_id) || {};
+            total += item.quantity * perUnitCost(item.purchase_rate, medUpd.unit_category, medUpd.tablets_per_strip);
           }
         }
       }
 
       // 4. Update the Purchase record
+      total = round2(total);
       const purchaseInfo = db.prepare('SELECT total_amount, amount_paid FROM purchases WHERE id=?').get(purchaseId);
       
       db.prepare(
@@ -1280,91 +1368,11 @@ app.delete('/api/purchases/:id', (req, res) => {
   }
 });
 
-// ============ DASHBOARD / REPORTS ============
-app.get('/api/dashboard', (req, res) => {
-  const today = new Date().toLocaleDateString('en-CA'); // YYYY-MM-DD format
-  const monthStart = today.slice(0, 7) + '-01';
-
-  const todaySales = db.prepare(`SELECT COALESCE(SUM(total_amount), 0) as total, COUNT(*) as count FROM invoices WHERE date(created_at) = ?`).get(today);
-  const todayCash = db.prepare(`SELECT COALESCE(SUM(total_amount), 0) as total FROM invoices WHERE date(created_at) = ? AND LOWER(payment_mode) = 'cash'`).get(today);
-  const todayUPI = db.prepare(`SELECT COALESCE(SUM(total_amount), 0) as total FROM invoices WHERE date(created_at) = ? AND LOWER(payment_mode) = 'upi'`).get(today);
-  const todayCredit = db.prepare(`SELECT COALESCE(SUM(credit_amount), 0) as total FROM invoices WHERE date(created_at) = ? AND credit_amount > 0`).get(today);
-  
-  const monthlySales = db.prepare(`SELECT COALESCE(SUM(total_amount), 0) as total FROM invoices WHERE date(created_at) >= ?`).get(monthStart);
-  const monthlyPurchases = db.prepare(`SELECT COALESCE(SUM(total_amount), 0) as total FROM purchases WHERE date(created_at) >= ?`).get(monthStart);
-
-  const lowStockThreshold = db.prepare("SELECT value FROM settings WHERE key = 'low_stock_threshold'").get();
-  const threshold = lowStockThreshold ? parseInt(lowStockThreshold.value) : 10;
-  
-  const lowStock = db.prepare(`SELECT m.brand_name, m.company_name, COALESCE(SUM(b.quantity), 0) as total_stock 
-    FROM medicines m LEFT JOIN batches b ON b.medicine_id = m.id WHERE m.is_active = 1 
-    GROUP BY m.id HAVING total_stock <= ? AND total_stock >= 0 ORDER BY total_stock LIMIT 10`).all(threshold);
-
-  const expiryAlertDays = db.prepare("SELECT value FROM settings WHERE key = 'expiry_alert_days'").get();
-  const days = expiryAlertDays ? parseInt(expiryAlertDays.value) : 90;
-  
-  const expiring = db.prepare(`SELECT b.*, m.brand_name, m.company_name FROM batches b 
-    JOIN medicines m ON b.medicine_id = m.id 
-    WHERE b.expiry_date <= date('now', '+' || ? || ' days') AND b.quantity > 0 
-    ORDER BY b.expiry_date LIMIT 10`).all(days);
-
-  const recentInvoices = db.prepare(`SELECT i.*, c.name as customer_name FROM invoices i LEFT JOIN customers c ON i.customer_id = c.id ORDER BY i.created_at DESC LIMIT 10`).all();
-
-  const totalOutstanding = db.prepare(`SELECT COALESCE(SUM(credit_balance), 0) as total FROM customers WHERE credit_balance > 0`).get();
-
-  // Fast moving - top 10 medicines by quantity sold this month
-  const fastMoving = db.prepare(`SELECT m.brand_name, m.company_name, SUM(ii.quantity) as total_sold
-    FROM invoice_items ii JOIN invoices i ON ii.invoice_id = i.id JOIN medicines m ON ii.medicine_id = m.id
-    WHERE date(i.created_at) >= ? GROUP BY ii.medicine_id ORDER BY total_sold DESC LIMIT 10`).all(monthStart);
-
-  res.json({
-    today: { total: todaySales.total, count: todaySales.count, cash: todayCash.total, upi: todayUPI.total, credit: todayCredit.total },
-    monthly: { sales: monthlySales.total, purchases: monthlyPurchases.total, profit: monthlySales.total - monthlyPurchases.total },
-    lowStock,
-    expiring,
-    recentInvoices,
-    totalOutstanding: totalOutstanding.total,
-    fastMoving
-  });
-});
-
-// Reports
-app.get('/api/reports/sales', (req, res) => {
-  const { from, to, group_by } = req.query;
-  let dateGroup = "date(created_at)";
-  if (group_by === 'month') dateGroup = "strftime('%Y-%m', created_at)";
-  
-  let query = `SELECT ${dateGroup} as period, SUM(total_amount) as total, COUNT(*) as count,
-    SUM(gst_amount) as gst,
-    SUM(CASE WHEN payment_mode='Cash' THEN total_amount ELSE 0 END) as cash,
-    SUM(CASE WHEN payment_mode='UPI' THEN total_amount ELSE 0 END) as upi,
-    SUM(credit_amount) as credit
-    FROM invoices WHERE 1=1`;
-  const params = [];
-  if (from) { query += ' AND date(created_at) >= ?'; params.push(from); }
-  if (to) { query += ' AND date(created_at) <= ?'; params.push(to); }
-  query += ` GROUP BY ${dateGroup} ORDER BY period DESC`;
-  res.json(db.prepare(query).all(...params));
-});
-
-app.get('/api/reports/profit', (req, res) => {
-  const { from, to } = req.query;
-  let salesQuery = `SELECT COALESCE(SUM(total_amount), 0) as total FROM invoices WHERE 1=1`;
-  let purchaseQuery = `SELECT COALESCE(SUM(total_amount), 0) as total FROM purchases WHERE 1=1`;
-  const params1 = [], params2 = [];
-  if (from) { salesQuery += ' AND date(created_at) >= ?'; purchaseQuery += ' AND date(created_at) >= ?'; params1.push(from); params2.push(from); }
-  if (to) { salesQuery += ' AND date(created_at) <= ?'; purchaseQuery += ' AND date(created_at) <= ?'; params1.push(to); params2.push(to); }
-  const sales = db.prepare(salesQuery).get(...params1);
-  const purchases = db.prepare(purchaseQuery).get(...params2);
-  res.json({ sales: sales.total, purchases: purchases.total, profit: sales.total - purchases.total });
-});
-
-app.get('/api/reports/outstanding', (req, res) => {
-  const rows = db.prepare(`SELECT c.*, 
-    (SELECT COUNT(*) FROM invoices WHERE customer_id = c.id AND credit_amount > 0) as credit_invoices
-    FROM customers c WHERE c.credit_balance > 0 ORDER BY c.credit_balance DESC`).all();
-  res.json(rows);
-});
+// NOTE: Shadowed duplicate routes were removed here — /api/dashboard,
+// /api/reports/sales, /api/reports/profit and /api/reports/outstanding were
+// defined a second time in this section. Express binds the FIRST registration,
+// so these later copies never executed. The authoritative implementations live
+// in the DASHBOARD and REPORTS sections earlier in this file.
 
 // --- Get Supplier Purchase Payment Report ---
 app.get('/api/reports/supplier-payments', (req, res) => {
@@ -1405,61 +1413,9 @@ app.get('/api/reports/supplier-payments', (req, res) => {
   }
 });
 
-// --- Get Schedule H1 Register Report ---
-app.get('/api/reports/h1-register', (req, res) => {
-  try {
-    const { from, to, medicine_search, doctor_search, patient_search } = req.query;
-    
-    let query = `
-      SELECT 
-        i.id as invoice_id,
-        i.created_at as supply_date,
-        h.patient_name,
-        h.patient_address,
-        h.doctor_name,
-        h.doctor_address,
-        h.doctor_reg_no,
-        h.prescription_no,
-        m.brand_name as medicine_name,
-        ii.quantity as quantity_supplied,
-        m.company_name as manufacturer_name,
-        b.batch_number,
-        b.expiry_date
-      FROM invoice_h1_details h
-      JOIN invoices i ON h.invoice_id = i.id
-      JOIN invoice_items ii ON i.id = ii.invoice_id
-      JOIN medicines m ON ii.medicine_id = m.id
-      JOIN batches b ON ii.batch_id = b.id
-      WHERE m.is_h1 = 1
-    `;
-    
-    let params = [];
-    if (from) {
-      query += ` AND date(i.created_at) >= ?`;
-      params.push(from);
-    }
-    if (to) {
-      query += ` AND date(i.created_at) <= ?`;
-      params.push(to);
-    }
-    if (medicine_search) {
-      query += ` AND m.brand_name LIKE ?`;
-      params.push(`%${medicine_search}%`);
-    }
-    if (doctor_search) {
-      query += ` AND h.doctor_name LIKE ?`;
-      params.push(`%${doctor_search}%`);
-    }
-    if (patient_search) {
-      query += ` AND h.patient_name LIKE ?`;
-      params.push(`%${patient_search}%`);
-    }
-
-    query += ` ORDER BY i.created_at DESC`;
-    
-    res.json(db.prepare(query).all(...params));
-  } catch (err) { res.status(500).json({ error: err.message }); }
-});
+// NOTE: A shadowed duplicate /api/reports/h1-register was removed here.
+// The authoritative version (with optional medicine/doctor/patient filters)
+// is defined earlier in the REPORTS section.
 
 // --- Purchase Summary Report ---
 app.get('/api/reports/purchases-summary', (req, res) => {
@@ -1490,15 +1446,16 @@ app.get('/api/reports/profitability', (req, res) => {
   const { from, to } = req.query;
   try {
     let query = `
-      SELECT 
+      SELECT
         date(i.created_at) as sale_date,
         COUNT(DISTINCT i.id) as bills,
-        SUM(ii.quantity * ii.unit_price) as sales_value,
-        SUM(ii.quantity * b.purchase_rate) as purchase_cost,
-        SUM((ii.quantity * ii.unit_price) - (ii.quantity * b.purchase_rate)) as gross_profit
+        SUM(ii.total) as sales_value,
+        SUM(${LINE_COGS_SQL}) as purchase_cost,
+        SUM(ii.total) - SUM(${LINE_COGS_SQL}) as gross_profit
       FROM invoices i
       JOIN invoice_items ii ON i.id = ii.invoice_id
       JOIN batches b ON ii.batch_id = b.id
+      JOIN medicines m ON ii.medicine_id = m.id
       WHERE 1=1
     `;
     const params = [];
@@ -1558,20 +1515,8 @@ app.post('/api/customers/:id/pay-credit', (req, res) => {
   res.json({ success: true, new_balance: customer.credit_balance - amount });
 });
 
-// Daily sales chart data for last 7 days
-app.get('/api/reports/daily-chart', (req, res) => {
-  const rows = db.prepare(`
-    WITH RECURSIVE dates(d) AS (
-      SELECT date('now', '-6 days')
-      UNION ALL
-      SELECT date(d, '+1 day') FROM dates WHERE d < date('now')
-    )
-    SELECT dates.d as date, COALESCE(SUM(i.total_amount), 0) as total, COUNT(i.id) as count
-    FROM dates LEFT JOIN invoices i ON date(i.created_at) = dates.d
-    GROUP BY dates.d ORDER BY dates.d
-  `).all();
-  res.json(rows);
-});
+// NOTE: A shadowed duplicate /api/reports/daily-chart was removed here.
+// The authoritative version (zero-filled, local-date) lives in the REPORTS section.
 
 // Non-Moving Medicines
 app.get('/api/reports/non-moving', (req, res) => {
@@ -1646,35 +1591,33 @@ app.use((err, req, res, next) => {
 });
 
 // --- Data Reconciliation ---
+// Repairs only unambiguously-invalid customer balances (negative or NULL).
+// A full recompute is intentionally NOT performed here: credit repayments made via
+// /customers/:id/pay-credit are not recorded against invoices, and a customer may
+// carry an opening balance, so the invoices table alone cannot reproduce the true
+// outstanding amount. The previous version reset every balance to 0 and re-added
+// only 'pending' invoices, which silently wiped legitimate 'udhaari' and partially
+// repaid balances. A ledger-based reconcile lands with the Phase-4 credit rework.
 app.post('/api/admin/reconcile-balances', (req, res) => {
   try {
-    const txn = db.transaction(() => {
-      // Reset all customer balances to 0
-      db.prepare('UPDATE customers SET credit_balance = 0').run();
-      
-      // Re-calculate from all Pending invoices
-      const creditInvoices = db.prepare(`
-        SELECT customer_id, SUM(total_amount - amount_paid) as total_credit 
-        FROM invoices 
-        WHERE LOWER(TRIM(payment_mode)) = 'pending'
-        AND customer_id IS NOT NULL
-        GROUP BY customer_id
-      `).all();
-      
-      for (const inv of creditInvoices) {
-        db.prepare('UPDATE customers SET credit_balance = ? WHERE id = ?').run(inv.total_credit, inv.customer_id);
-      }
+    const info = db.prepare(
+      "UPDATE customers SET credit_balance = 0 WHERE credit_balance IS NULL OR credit_balance < 0"
+    ).run();
+    res.json({
+      success: true,
+      corrected: info.changes,
+      message: info.changes > 0
+        ? `Reconciled ${info.changes} customer balance(s) that were negative or unset.`
+        : 'All customer balances are valid. Nothing to reconcile.'
     });
-    txn();
-    res.json({ success: true, message: 'Customer balances reconciled successfully.' });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 const PORT = process.env.PORT || 3001;
 const server = app.listen(PORT, () => {
   console.log(`AthassMediSync API running on port ${PORT}`);
-  // Initialize WhatsApp after server is ready
-  initWhatsApp(app);
+  // WhatsApp routes are registered once during setup (initWhatsApp near the top).
+  // It does not start a client — the user connects from Settings > WhatsApp.
 });
 
 server.on('error', (e) => {

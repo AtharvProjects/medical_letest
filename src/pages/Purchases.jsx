@@ -1,836 +1,635 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { api } from '../services/api';
-import { Search, Plus, Eye, Calendar, User, Package, CreditCard, Edit2, Trash2 } from 'lucide-react';
+import { useToast } from '../App';
+import { Plus, Eye, ArrowLeft, CreditCard, Edit2, Trash2, ShoppingCart, Wallet, FileText, AlertCircle } from 'lucide-react';
+import { money, formatDate, todayStr, daysUntil } from '../utils/format';
+import {
+  Button, DataTable, SearchInput, EmptyState, Badge, StatCard,
+  FormField, Input, Select,
+} from '../components/ui';
+
+const TABLET_LIKE = ['Tablet', 'Capsule', 'Strip'];
+
+// Per-line purchase cost. quantity is in individual units/tablets while
+// purchase_rate is per STRIP, so for tablet-like categories divide the rate by
+// the strip size. Mirrors server/money.js so displayed totals match what the
+// server stores as total_amount.
+const lineCost = (it) => {
+  const qty = Number(it.quantity) || 0;
+  const rate = parseFloat(it.purchase_rate) || 0;
+  const isTabletLike = TABLET_LIKE.includes(it.unit_category);
+  const tps = isTabletLike ? (Number(it.tablets_per_strip) || 1) : 1;
+  return qty * (rate / (tps > 0 ? tps : 1));
+};
+const itemsTotal = (list) => (list || []).reduce((sum, i) => sum + lineCost(i), 0);
+
+const statusBadge = (p) => {
+  const total = Number(p.total_amount) || 0;
+  const paid = Number(p.amount_paid) || 0;
+  if (total > 0 && paid >= total - 0.01) return <Badge tone="green">Paid</Badge>;
+  if (paid > 0) return <Badge tone="yellow">Partial</Badge>;
+  return <Badge tone="red">Unpaid</Badge>;
+};
 
 export default function Purchases() {
-  const [view, setView] = useState('list'); // list, create, detail
+  const [view, setView] = useState('list');
+  const [selectedId, setSelectedId] = useState(null);
+  const [editing, setEditing] = useState(null);
+
+  const goList = () => { setEditing(null); setView('list'); };
+
+  if (view === 'create') {
+    return <PurchaseCreate editing={editing} onDone={goList} onCancel={goList} />;
+  }
+  if (view === 'detail') {
+    return (
+      <PurchaseDetail
+        id={selectedId}
+        onBack={() => setView('list')}
+        onEdit={(purchase) => { setEditing(purchase); setView('create'); }}
+      />
+    );
+  }
+  return (
+    <PurchaseList
+      onNew={() => { setEditing(null); setView('create'); }}
+      onView={(id) => { setSelectedId(id); setView('detail'); }}
+    />
+  );
+}
+
+/* ------------------------------- LIST ------------------------------- */
+
+function PurchaseList({ onNew, onView }) {
   const [purchases, setPurchases] = useState([]);
-  const [loading, setLoading] = useState(false);
-  
-  // Create state
+  const [loading, setLoading] = useState(true);
+  const [search, setSearch] = useState('');
+  const showToast = useToast();
+
+  useEffect(() => {
+    setLoading(true);
+    api.get('/purchases')
+      .then(setPurchases)
+      .catch(() => showToast('Failed to load purchases', 'error'))
+      .finally(() => setLoading(false));
+  }, [showToast]);
+
+  const stats = useMemo(() => {
+    let value = 0, outstanding = 0, unpaid = 0;
+    for (const p of purchases) {
+      const total = Number(p.total_amount) || 0;
+      const paid = Number(p.amount_paid) || 0;
+      value += total;
+      const bal = total - paid;
+      if (bal > 0.01) { outstanding += bal; unpaid++; }
+    }
+    return { count: purchases.length, value, outstanding, unpaid };
+  }, [purchases]);
+
+  const filtered = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    if (!q) return purchases;
+    return purchases.filter(
+      (p) =>
+        (p.supplier_name || '').toLowerCase().includes(q) ||
+        (p.invoice_number || '').toLowerCase().includes(q)
+    );
+  }, [purchases, search]);
+
+  const columns = [
+    { header: 'Date', render: (p) => formatDate(p.purchase_date) },
+    { header: 'Supplier', render: (p) => <span style={{ fontWeight: 500 }}>{p.supplier_name || '—'}</span> },
+    { header: 'Invoice #', render: (p) => p.invoice_number || <span className="text-muted">—</span> },
+    { header: 'Total', align: 'right', render: (p) => money(p.total_amount) },
+    { header: 'Paid', align: 'right', render: (p) => <span style={{ color: 'var(--success)' }}>{money(p.amount_paid)}</span> },
+    {
+      header: 'Balance',
+      align: 'right',
+      render: (p) => {
+        const bal = (Number(p.total_amount) || 0) - (Number(p.amount_paid) || 0);
+        return <span style={{ color: bal > 0.01 ? 'var(--danger)' : 'var(--text-secondary)', fontWeight: bal > 0.01 ? 600 : 400 }}>{money(bal)}</span>;
+      },
+    },
+    { header: 'Status', align: 'center', render: (p) => statusBadge(p) },
+    { header: '', align: 'right', width: 100, render: (p) => <Button size="sm" variant="secondary" icon={Eye} onClick={() => onView(p.id)}>View</Button> },
+  ];
+
+  return (
+    <div>
+      <div className="toolbar">
+        <div className="toolbar-left">
+          <SearchInput value={search} onChange={setSearch} placeholder="Search supplier or invoice…" width={280} />
+        </div>
+        <div className="toolbar-right">
+          <Button variant="primary" icon={Plus} onClick={onNew}>New Purchase</Button>
+        </div>
+      </div>
+
+      <div className="stats-grid">
+        <StatCard label="Total Purchases" value={stats.count} accent="blue" icon={ShoppingCart} />
+        <StatCard label="Total Value" value={money(stats.value)} accent="purple" icon={FileText} />
+        <StatCard label="Outstanding Payable" value={money(stats.outstanding)} accent="red" icon={Wallet} />
+        <StatCard label="Unpaid / Partial" value={stats.unpaid} accent="amber" icon={AlertCircle} />
+      </div>
+
+      <div className="glass-card" style={{ padding: 0, overflow: 'hidden' }}>
+        <DataTable
+          loading={loading}
+          columns={columns}
+          rows={filtered}
+          empty={
+            <EmptyState
+              icon={ShoppingCart}
+              title="No purchases found"
+              message={search ? 'No purchases match your search.' : 'Record your first stock purchase to get started.'}
+              action={!search && <Button icon={Plus} onClick={onNew}>New Purchase</Button>}
+            />
+          }
+        />
+      </div>
+    </div>
+  );
+}
+
+/* ------------------------------ DETAIL ------------------------------ */
+
+function PurchaseDetail({ id, onBack, onEdit }) {
+  const [purchase, setPurchase] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const showToast = useToast();
+
+  useEffect(() => {
+    setLoading(true);
+    api.get(`/purchases/${id}`)
+      .then(setPurchase)
+      .catch(() => showToast('Failed to load purchase', 'error'))
+      .finally(() => setLoading(false));
+  }, [id, showToast]);
+
+  const columns = [
+    { header: 'Medicine', render: (it) => <span style={{ fontWeight: 500 }}>{it.brand_name}</span> },
+    { header: 'Batch', render: (it) => it.batch_number },
+    { header: 'Expiry', render: (it) => formatDate(it.expiry_date) },
+    { header: 'Qty', align: 'right', render: (it) => it.quantity },
+    { header: 'Rate', align: 'right', render: (it) => money(it.purchase_rate) },
+    { header: 'MRP', align: 'right', render: (it) => money(it.mrp) },
+    { header: 'Total', align: 'right', render: (it) => money(lineCost(it)) },
+  ];
+
+  const total = Number(purchase?.total_amount) || 0;
+  const paid = Number(purchase?.amount_paid) || 0;
+
+  return (
+    <div>
+      <div className="toolbar">
+        <div className="toolbar-left">
+          <Button variant="secondary" icon={ArrowLeft} onClick={onBack}>Back</Button>
+          <h2 className="section-title" style={{ marginBottom: 0 }}>
+            Purchase #{id} {purchase && statusBadge(purchase)}
+          </h2>
+        </div>
+        <div className="toolbar-right">
+          {purchase && <Button variant="primary" icon={Edit2} onClick={() => onEdit(purchase)}>Edit Purchase</Button>}
+        </div>
+      </div>
+
+      {loading || !purchase ? (
+        <div className="glass-card"><DataTable loading columns={columns} rows={[]} /></div>
+      ) : (
+        <>
+          <div className="glass-card mb-4">
+            <div className="two-col">
+              <Detail label="Supplier" value={purchase.supplier_name} />
+              <Detail label="Invoice No" value={purchase.invoice_number || '—'} />
+              <Detail label="Date" value={formatDate(purchase.purchase_date)} />
+              <Detail label="Total Amount" value={money(total)} strong accent="var(--primary)" />
+              <Detail label="Amount Paid" value={money(paid)} strong accent="var(--success)" />
+              <Detail label="Remaining Balance" value={money(total - paid)} strong accent={total - paid > 0.01 ? 'var(--danger)' : 'var(--text-secondary)'} />
+            </div>
+          </div>
+
+          <div className="glass-card" style={{ padding: 0, overflow: 'hidden' }}>
+            <DataTable
+              columns={columns}
+              rows={purchase.items || []}
+              empty={<EmptyState title="No items" message="This purchase has no line items." height={140} />}
+            />
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+function Detail({ label, value, strong, accent }) {
+  return (
+    <div>
+      <div className="text-muted text-xs" style={{ textTransform: 'uppercase', letterSpacing: 0.5 }}>{label}</div>
+      <div style={{ fontWeight: strong ? 700 : 500, fontSize: strong ? 18 : 14, color: accent || 'var(--text-primary)', marginTop: 2 }}>
+        {value}
+      </div>
+    </div>
+  );
+}
+
+/* ------------------------------ CREATE ------------------------------ */
+
+const EMPTY_ITEM = {
+  medicine_id: '', medicine_name: '', batch_number: '', expiry_date: '', mfg_date: '',
+  quantity: '', pack_count: '', purchase_rate: '', selling_rate: '', mrp: '',
+  unit_category: '', tablets_per_strip: 10, gst_percent: 12,
+};
+
+function useItemValidation(item) {
+  return useMemo(() => {
+    const today = todayStr();
+    const sell = parseFloat(item.selling_rate);
+    const purch = parseFloat(item.purchase_rate);
+    const mrp = parseFloat(item.mrp);
+    const errors = {};
+
+    if (!isNaN(sell) && !isNaN(purch) && sell < purch) errors.selling_rate = `Cannot be below purchase rate (${money(purch)})`;
+    else if (!isNaN(sell) && !isNaN(mrp) && sell > mrp) errors.selling_rate = `Cannot exceed MRP (${money(mrp)})`;
+    if (!isNaN(purch) && !isNaN(mrp) && purch > mrp) errors.purchase_rate = `Cannot exceed MRP (${money(mrp)})`;
+    if (item.expiry_date && item.expiry_date <= today) errors.expiry_date = 'Must be a future date — expired stock cannot be purchased';
+    if (item.mfg_date && item.expiry_date && item.mfg_date >= item.expiry_date) errors.mfg_date = 'MFG must be before expiry';
+
+    const margin = (!isNaN(sell) && !isNaN(purch) && purch > 0) ? ((sell - purch) / purch) * 100 : null;
+    const mrpDiscount = (!isNaN(sell) && !isNaN(mrp) && mrp > 0) ? ((mrp - sell) / mrp) * 100 : null;
+
+    const warnings = [];
+    const dte = item.expiry_date && !errors.expiry_date ? daysUntil(item.expiry_date) : null;
+    if (dte != null && dte > 0 && dte < 90) warnings.push(`This batch expires in ${dte} days`);
+    if (margin != null && !isNaN(sell) && sell > 0 && margin < 5) warnings.push(`Very low profit margin: ${margin.toFixed(1)}%`);
+
+    return { errors, warnings, margin, mrpDiscount, hasError: Object.keys(errors).length > 0 };
+  }, [item]);
+}
+
+function PurchaseCreate({ editing, onDone, onCancel }) {
+  const showToast = useToast();
   const [suppliers, setSuppliers] = useState([]);
   const [medicines, setMedicines] = useState([]);
   const [batches, setBatches] = useState([]);
+  const [saving, setSaving] = useState(false);
+
+  const [formData, setFormData] = useState({
+    id: editing?.id,
+    supplier_id: editing?.supplier_id || '',
+    invoice_number: editing?.invoice_number || '',
+    purchase_date: (editing?.purchase_date || todayStr()).slice(0, 10),
+    notes: editing?.notes || '',
+    amount_paid: editing?.amount_paid ?? '',
+    payment_mode: 'Cash',
+    payment_notes: '',
+  });
+
+  const [items, setItems] = useState(
+    editing?.items
+      ? editing.items.map((it) => ({
+          id: `${it.batch_id || it.medicine_id}-${Math.random()}`,
+          medicine_id: it.medicine_id,
+          medicine_name: it.brand_name,
+          batch_id: it.batch_id,
+          batch_number: it.batch_number,
+          expiry_date: (it.expiry_date || '').slice(0, 10),
+          mfg_date: (it.mfg_date || '').slice(0, 10),
+          quantity: it.quantity,
+          purchase_rate: it.purchase_rate,
+          selling_rate: it.selling_rate,
+          mrp: it.mrp,
+          unit_category: it.unit_category || 'Tablet',
+          tablets_per_strip: it.tablets_per_strip || 10,
+          pack_count: '',
+        }))
+      : []
+  );
+
+  const [currentItem, setCurrentItem] = useState(EMPTY_ITEM);
   const [searchMed, setSearchMed] = useState('');
   const [medResults, setMedResults] = useState([]);
-  
-  const [formData, setFormData] = useState({
-    supplier_id: '',
-    invoice_number: '',
-    purchase_date: new Date().toISOString().slice(0, 10),
-    notes: '',
-    amount_paid: '',
-    payment_mode: 'Cash',
-    payment_notes: ''
-  });
-  
-  const [items, setItems] = useState([]);
-  const [currentItem, setCurrentItem] = useState({
-    medicine_id: '',
-    medicine_name: '',
-    batch_number: '',
-    expiry_date: '',
-    mfg_date: '',
-    quantity: '',
-    pack_count: '',
-    purchase_rate: '',
-    selling_rate: '',
-    mrp: '',
-    unit_category: '',
-    tablets_per_strip: 10
-  });
+  const blurTimer = useRef(null);
 
-  const [selectedPurchase, setSelectedPurchase] = useState(null);
+  const v = useItemValidation(currentItem);
 
   useEffect(() => {
-    if (view === 'list') fetchPurchases();
-    if (view === 'create') {
-      fetchSuppliers();
-      fetchMedicines();
-      fetchBatches();
-    }
-  }, [view]);
+    Promise.all([api.get('/suppliers'), api.get('/medicines'), api.get('/batches')])
+      .then(([s, m, b]) => { setSuppliers(s); setMedicines(m); setBatches(b); })
+      .catch(() => showToast('Failed to load form data', 'error'));
+  }, [showToast]);
 
-  const fetchPurchases = async () => {
-    setLoading(true);
-    try {
-      const data = await api.get('/purchases');
-      setPurchases(data);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const fetchSuppliers = async () => {
-    const data = await api.get('/suppliers');
-    setSuppliers(data);
-  };
-
-  const fetchMedicines = async () => {
-    const data = await api.get('/medicines');
-    setMedicines(data);
-  };
-
-  const fetchBatches = async () => {
-    const data = await api.get('/batches');
-    setBatches(data);
-  };
+  const setItem = (patch) => setCurrentItem((p) => ({ ...p, ...patch }));
 
   const handleSearchMed = (query) => {
     setSearchMed(query);
-    if (!query) {
-      setMedResults([]);
-      return;
-    }
+    if (!query) { setMedResults([]); return; }
     const lower = query.toLowerCase();
-    
-    // Find matching medicines
-    const matchingMeds = medicines.filter(m => 
-      m.brand_name.toLowerCase().includes(lower) || 
-      (m.generic_name && m.generic_name.toLowerCase().includes(lower))
+    const matching = medicines.filter(
+      (m) => m.brand_name.toLowerCase().includes(lower) || (m.generic_name && m.generic_name.toLowerCase().includes(lower))
     );
-
-    // Build combined options
-    let options = [];
-    matchingMeds.forEach(m => {
-      // Find batches for this medicine
-      const medBatches = batches.filter(b => b.medicine_id === m.id);
-      
-      // Add each batch as an option
-      medBatches.forEach(b => {
+    const options = [];
+    matching.forEach((m) => {
+      batches.filter((b) => b.medicine_id === m.id).forEach((b) => {
         options.push({
-          type: 'batch',
-          unique_id: `batch_${b.id}`,
-          medicine_id: m.id,
-          brand_name: m.brand_name,
-          company_name: m.company_name,
-          batch_number: b.batch_number,
-          quantity: b.quantity,
-          gst_percent: m.gst_percent,
-          expiry_date: b.expiry_date,
-          mrp: b.mrp,
-          selling_rate: b.selling_rate,
-          purchase_rate: b.purchase_rate,
-          unit_category: m.unit_category,
-          tablets_per_strip: m.tablets_per_strip
+          type: 'batch', unique_id: `batch_${b.id}`, medicine_id: m.id, brand_name: m.brand_name,
+          company_name: m.company_name, batch_number: b.batch_number, quantity: b.quantity,
+          gst_percent: m.gst_percent, expiry_date: b.expiry_date, mrp: b.mrp, selling_rate: b.selling_rate,
+          purchase_rate: b.purchase_rate, unit_category: m.unit_category, tablets_per_strip: m.tablets_per_strip,
         });
       });
-      
-      // Always add a base option for New Batch
       options.push({
-        type: 'medicine',
-        unique_id: `med_${m.id}`,
-        medicine_id: m.id,
-        brand_name: m.brand_name,
-        company_name: m.company_name,
-        gst_percent: m.gst_percent,
-        unit_category: m.unit_category,
-        tablets_per_strip: m.tablets_per_strip
+        type: 'medicine', unique_id: `med_${m.id}`, medicine_id: m.id, brand_name: m.brand_name,
+        company_name: m.company_name, gst_percent: m.gst_percent, unit_category: m.unit_category,
+        tablets_per_strip: m.tablets_per_strip,
       });
     });
-
     setMedResults(options.slice(0, 15));
   };
 
-  const selectMedicine = (item) => {
-    if (item.type === 'batch') {
+  const selectMedicine = (opt) => {
+    const base = {
+      medicine_id: opt.medicine_id, medicine_name: opt.brand_name, gst_percent: opt.gst_percent,
+      unit_category: opt.unit_category || 'Tablet', tablets_per_strip: opt.tablets_per_strip || 10, pack_count: '',
+    };
+    if (opt.type === 'batch') {
       setCurrentItem({
-        ...currentItem,
-        medicine_id: item.medicine_id,
-        medicine_name: item.brand_name,
-        batch_number: item.batch_number || '',
-        gst_percent: item.gst_percent,
-        expiry_date: item.expiry_date || '',
-        mrp: item.mrp || '',
-        selling_rate: item.selling_rate || '',
-        purchase_rate: item.purchase_rate || '',
-        unit_category: item.unit_category || 'Tablet',
-        tablets_per_strip: item.tablets_per_strip || 10,
-        pack_count: ''
+        ...EMPTY_ITEM, ...base,
+        batch_number: opt.batch_number || '', expiry_date: (opt.expiry_date || '').slice(0, 10),
+        mrp: opt.mrp || '', selling_rate: opt.selling_rate || '', purchase_rate: opt.purchase_rate || '',
       });
     } else {
-      setCurrentItem({
-        ...currentItem,
-        medicine_id: item.medicine_id,
-        medicine_name: item.brand_name,
-        batch_number: '',
-        gst_percent: item.gst_percent,
-        expiry_date: '',
-        mrp: '',
-        selling_rate: '',
-        purchase_rate: '',
-        unit_category: item.unit_category || 'Tablet',
-        tablets_per_strip: item.tablets_per_strip || 10,
-        pack_count: ''
-      });
+      setCurrentItem({ ...EMPTY_ITEM, ...base });
     }
-    setSearchMed(item.brand_name);
+    setSearchMed(opt.brand_name);
     setMedResults([]);
   };
 
   const addItem = () => {
     if (!currentItem.medicine_id || !currentItem.batch_number || !currentItem.quantity || !currentItem.expiry_date) {
-      alert('Please fill all required fields: Medicine, Batch No, Expiry Date and Quantity');
-      return;
+      return showToast('Fill Medicine, Batch No, Expiry and Quantity', 'error');
     }
-    const today = new Date().toISOString().slice(0, 10);
-    const sell = parseFloat(currentItem.selling_rate);
-    const purch = parseFloat(currentItem.purchase_rate);
-    const mrp = parseFloat(currentItem.mrp);
     const qty = parseInt(currentItem.quantity);
+    if (isNaN(qty) || qty <= 0) return showToast('Quantity must be a positive number', 'error');
+    if (v.hasError) return showToast(Object.values(v.errors)[0], 'error');
 
-    // Hard errors
-    if (!isNaN(sell) && !isNaN(purch) && sell < purch) {
-      alert(`❌ Selling Rate (₹${sell}) cannot be less than Purchase Rate (₹${purch})`);
-      return;
-    }
-    if (!isNaN(sell) && !isNaN(mrp) && sell > mrp) {
-      alert(`❌ Selling Rate (₹${sell}) cannot exceed MRP (₹${mrp})`);
-      return;
-    }
-    if (!isNaN(purch) && !isNaN(mrp) && purch > mrp) {
-      alert(`❌ Purchase Rate (₹${purch}) cannot exceed MRP (₹${mrp})`);
-      return;
-    }
-    if (currentItem.expiry_date <= today) {
-      alert('❌ Expiry date must be a future date — expired stock cannot be purchased');
-      return;
-    }
-    if (currentItem.mfg_date && currentItem.mfg_date >= currentItem.expiry_date) {
-      alert('❌ MFG date must be before Expiry date');
-      return;
-    }
-    if (isNaN(qty) || qty <= 0) {
-      alert('❌ Quantity must be a positive number');
-      return;
-    }
-
-    setItems([...items, { ...currentItem, id: Date.now() }]);
-    setCurrentItem({
-      medicine_id: '',
-      medicine_name: '',
-      batch_number: '',
-      expiry_date: '',
-      mfg_date: '',
-      quantity: '',
-      pack_count: '',
-      purchase_rate: '',
-      selling_rate: '',
-      mrp: '',
-      unit_category: '',
-      tablets_per_strip: 10
-    });
+    setItems((prev) => [...prev, { ...currentItem, id: Date.now() }]);
+    setCurrentItem(EMPTY_ITEM);
     setSearchMed('');
   };
 
-  const removeItem = (id) => {
-    setItems(items.filter(i => i.id !== id));
-  };
+  const removeItem = (id) => setItems((prev) => prev.filter((i) => i.id !== id));
+  const editItem = (item) => { setCurrentItem({ ...item }); setSearchMed(item.medicine_name); removeItem(item.id); };
 
-  const editItem = (item) => {
-    setCurrentItem({ ...item });
-    setSearchMed(item.medicine_name);
-    removeItem(item.id);
-  };
+  const total = itemsTotal(items);
+  const amtPaid = parseFloat(formData.amount_paid) || 0;
+  const amtPaidExceedsTotal = amtPaid > total && total > 0;
 
   const handleSubmit = async () => {
-    if (!formData.supplier_id) {
-      alert('Please select a supplier');
-      return;
-    }
-    if (items.length === 0) {
-      alert('Please add at least one item');
-      return;
-    }
-    const totalAmt = items.reduce((sum, i) => sum + (i.quantity * i.purchase_rate), 0);
-    const paid = parseFloat(formData.amount_paid) || 0;
-    if (paid > totalAmt) {
-      alert(`❌ Amount Paying (₹${paid.toFixed(2)}) cannot exceed Invoice Total (₹${totalAmt.toFixed(2)})`);
-      return;
-    }
-    if (items.some(i => !i.medicine_id)) {
-      alert('❌ Error: One or more items in the list do not have a valid medicine ID. Please remove and re-add them.');
-      return;
-    }
-    if (paid < 0) {
-      alert('❌ Amount paid cannot be negative');
-      return;
-    }
+    if (!formData.supplier_id) return showToast('Please select a supplier', 'error');
+    if (items.length === 0) return showToast('Add at least one item', 'error');
+    if (items.some((i) => !i.medicine_id)) return showToast('An item is missing its medicine — remove and re-add it', 'error');
+    if (amtPaid < 0) return showToast('Amount paid cannot be negative', 'error');
+    if (amtPaidExceedsTotal) return showToast(`Amount paying (${money(amtPaid)}) cannot exceed total (${money(total)})`, 'error');
 
+    const payload = {
+      ...formData,
+      amount_paid: amtPaid,
+      items: items.map((i) => ({
+        medicine_id: i.medicine_id,
+        batch_id: i.batch_id,
+        batch_number: i.batch_number,
+        expiry_date: i.expiry_date,
+        mfg_date: i.mfg_date,
+        quantity: parseInt(i.quantity),
+        purchase_rate: parseFloat(i.purchase_rate),
+        selling_rate: parseFloat(i.selling_rate),
+        mrp: parseFloat(i.mrp),
+      })),
+    };
+
+    setSaving(true);
     try {
-      const payload = {
-        ...formData,
-        amount_paid: parseFloat(formData.amount_paid) || 0,
-        items: items.map(i => ({
-          medicine_id: i.medicine_id,
-          batch_id: i.batch_id, // Required for edits
-          batch_number: i.batch_number,
-          expiry_date: i.expiry_date,
-          mfg_date: i.mfg_date,
-          quantity: parseInt(i.quantity),
-          purchase_rate: parseFloat(i.purchase_rate),
-          selling_rate: parseFloat(i.selling_rate),
-          mrp: parseFloat(i.mrp)
-        }))
-      };
-
-      if (formData.id) {
-        await api.put(`/purchases/${formData.id}`, payload);
-      } else {
-        await api.post('/purchases', payload);
-      }
-      setView('list');
-      setItems([]);
-      setFormData({
-        supplier_id: '',
-        invoice_number: '',
-        purchase_date: new Date().toISOString().slice(0, 10),
-        notes: '',
-        amount_paid: '',
-        payment_mode: 'Cash',
-        payment_notes: ''
-      });
+      if (formData.id) await api.put(`/purchases/${formData.id}`, payload);
+      else await api.post('/purchases', payload);
+      showToast(formData.id ? 'Purchase updated' : 'Purchase saved');
+      onDone();
     } catch (err) {
-      alert(err.message);
+      showToast(err.message, 'error');
+    } finally {
+      setSaving(false);
     }
   };
 
-  const handleEditPurchase = () => {
-    setFormData({
-      id: selectedPurchase.id,
-      supplier_id: selectedPurchase.supplier_id,
-      invoice_number: selectedPurchase.invoice_number || '',
-      purchase_date: selectedPurchase.purchase_date || new Date().toISOString().slice(0, 10),
-      notes: selectedPurchase.notes || '',
-      amount_paid: selectedPurchase.amount_paid || '',
-      payment_mode: 'Cash',
-      payment_notes: ''
-    });
-    setItems(selectedPurchase.items.map(item => ({
-      id: Date.now() + Math.random(),
-      medicine_id: item.medicine_id,
-      medicine_name: item.brand_name,
-      batch_id: item.batch_id,
-      batch_number: item.batch_number,
-      expiry_date: item.expiry_date,
-      mfg_date: item.mfg_date || '',
-      quantity: item.quantity,
-      purchase_rate: item.purchase_rate,
-      selling_rate: item.selling_rate,
-      mrp: item.mrp,
-      unit_category: item.unit_category || 'Tablet',
-      tablets_per_strip: item.tablets_per_strip || 10,
-      pack_count: ''
-    })));
-    fetchSuppliers();
-    fetchMedicines();
-    fetchBatches();
-    setView('create');
-  };
+  const isTabletLike = TABLET_LIKE.includes(currentItem.unit_category);
+  const tps = currentItem.tablets_per_strip || 10;
 
-  const viewDetail = async (id) => {
-    try {
-      const data = await api.get(`/purchases/${id}`);
-      setSelectedPurchase(data);
-      setView('detail');
-    } catch (err) {
-      console.error(err);
-    }
-  };
+  const itemColumns = [
+    { header: 'Item', render: (it) => <span style={{ fontWeight: 500 }}>{it.medicine_name}</span> },
+    { header: 'Batch', render: (it) => it.batch_number },
+    {
+      header: 'Qty',
+      align: 'right',
+      render: (it) => {
+        const isTab = TABLET_LIKE.includes(it.unit_category);
+        if (!isTab) return it.quantity;
+        const strips = Math.floor(it.quantity / it.tablets_per_strip);
+        const tabs = it.quantity % it.tablets_per_strip;
+        return `${strips > 0 ? strips + 's ' : ''}${tabs > 0 ? tabs + 't' : ''}`.trim() || it.quantity;
+      },
+    },
+    { header: 'Total', align: 'right', render: (it) => money(lineCost(it)) },
+    {
+      header: '',
+      align: 'right',
+      width: 80,
+      render: (it) => (
+        <div className="flex gap-2" style={{ justifyContent: 'flex-end' }}>
+          <Button variant="ghost" size="sm" icon={Edit2} onClick={() => editItem(it)} title="Edit item" />
+          <Button variant="ghost" size="sm" icon={Trash2} onClick={() => removeItem(it.id)} title="Remove item" />
+        </div>
+      ),
+    },
+  ];
 
-  if (view === 'create') {
-    const today = new Date().toISOString().slice(0, 10);
-    const sell = parseFloat(currentItem.selling_rate);
-    const purch = parseFloat(currentItem.purchase_rate);
-    const mrp = parseFloat(currentItem.mrp);
-
-    const isSellLessThanPurchase = !isNaN(sell) && !isNaN(purch) && sell < purch;
-    const isSellGreaterThanMrp   = !isNaN(sell) && !isNaN(mrp)  && sell > mrp;
-    const isPurchGreaterThanMrp  = !isNaN(purch) && !isNaN(mrp) && purch > mrp;
-    const isExpiryInPast = currentItem.expiry_date && currentItem.expiry_date <= today;
-    const isMfgAfterExpiry = currentItem.mfg_date && currentItem.expiry_date && currentItem.mfg_date >= currentItem.expiry_date;
-    const hasHardError = isSellLessThanPurchase || isSellGreaterThanMrp || isPurchGreaterThanMrp || isExpiryInPast || isMfgAfterExpiry;
-
-    const profitMargin = (!isNaN(sell) && !isNaN(purch) && purch > 0) ? ((sell - purch) / purch * 100).toFixed(1) : null;
-    const mrpDiscount  = (!isNaN(sell) && !isNaN(mrp)  && mrp  > 0) ? ((mrp - sell) / mrp * 100).toFixed(1) : null;
-    const totalAmt = items.reduce((sum, i) => sum + (i.quantity * parseFloat(i.purchase_rate || 0)), 0);
-    const amtPaid = parseFloat(formData.amount_paid) || 0;
-    const amtPaidExceedsTotal = amtPaid > totalAmt && totalAmt > 0;
-    const daysToExpiry = currentItem.expiry_date ? Math.floor((new Date(currentItem.expiry_date) - new Date()) / 86400000) : null;
-    const nearExpiry = daysToExpiry !== null && daysToExpiry > 0 && daysToExpiry < 90;
-
-    const isTabletLike = ['Tablet', 'Capsule', 'Strip'].includes(currentItem.unit_category);
-    const tps = currentItem.tablets_per_strip || 10;
-
-    return (
-      <div className="pb-8">
-        <div className="toolbar">
-          <button className="btn btn-secondary" onClick={() => {
-            setView('list');
-            setFormData({...formData, id: undefined}); // clear id on cancel
-          }}>← Back</button>
-          <h2 className="section-title mb-0">{formData.id ? `Edit Purchase #${formData.id}` : 'New Purchase Entry'}</h2>
-          <div className="flex-1"></div>
-          <button className="btn btn-primary" onClick={handleSubmit}>
+  return (
+    <div style={{ paddingBottom: 24 }}>
+      <div className="toolbar">
+        <div className="toolbar-left">
+          <Button variant="secondary" icon={ArrowLeft} onClick={onCancel}>Back</Button>
+          <h2 className="section-title" style={{ marginBottom: 0 }}>{formData.id ? `Edit Purchase #${formData.id}` : 'New Purchase Entry'}</h2>
+        </div>
+        <div className="toolbar-right">
+          <Button variant="primary" loading={saving} disabled={amtPaidExceedsTotal} onClick={handleSubmit}>
             {formData.id ? 'Save Changes' : 'Save Purchase'}
-          </button>
+          </Button>
         </div>
+      </div>
 
-        <div className="glass-card mb-4">
-          <div className="form-row">
-            <div className="form-group">
-              <label className="form-label">Supplier *</label>
-              <select 
-                className="form-select"
-                value={formData.supplier_id}
-                onChange={e => setFormData({...formData, supplier_id: e.target.value})}
-              >
-                <option value="">Select Supplier</option>
-                {suppliers.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
-              </select>
-            </div>
-            <div className="form-group">
-              <label className="form-label">Invoice Number</label>
-              <input 
-                type="text" 
-                className="form-input"
-                value={formData.invoice_number}
-                onChange={e => setFormData({...formData, invoice_number: e.target.value})}
-              />
-            </div>
-            <div className="form-group">
-              <label className="form-label">Purchase Date</label>
-              <input 
-                type="date" 
-                className="form-input"
-                value={formData.purchase_date}
-                onChange={e => setFormData({...formData, purchase_date: e.target.value})}
-              />
-            </div>
-          </div>
+      <div className="glass-card mb-4">
+        <div className="form-row">
+          <FormField label="Supplier" required>
+            <Select value={formData.supplier_id} onChange={(e) => setFormData({ ...formData, supplier_id: e.target.value })}>
+              <option value="">Select Supplier</option>
+              {suppliers.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+            </Select>
+          </FormField>
+          <FormField label="Invoice Number">
+            <Input value={formData.invoice_number} onChange={(e) => setFormData({ ...formData, invoice_number: e.target.value })} />
+          </FormField>
+          <FormField label="Purchase Date">
+            <Input type="date" value={formData.purchase_date} max={todayStr()} onChange={(e) => setFormData({ ...formData, purchase_date: e.target.value })} />
+          </FormField>
         </div>
+      </div>
 
-        <div className="two-col mb-4">
-          <div className="glass-card">
-            <h3 className="text-sm font-semibold mb-3">Add Item</h3>
-            <div className="form-group relative">
-              <label className="form-label">Medicine Search *</label>
-              <input 
-                type="text" 
-                className="form-input"
-                placeholder="Type medicine name..."
+      <div className="two-col mb-4">
+        {/* Add item */}
+        <div className="glass-card">
+          <h3 className="section-title" style={{ fontSize: 14, marginBottom: 14 }}>Add Item</h3>
+
+          <FormField label="Medicine Search" required>
+            <div style={{ position: 'relative' }}>
+              <Input
+                placeholder="Type medicine name…"
                 value={searchMed}
-                onChange={e => handleSearchMed(e.target.value)}
+                onChange={(e) => handleSearchMed(e.target.value)}
+                onFocus={() => { if (blurTimer.current) clearTimeout(blurTimer.current); }}
+                onBlur={() => { blurTimer.current = setTimeout(() => setMedResults([]), 150); }}
               />
               {medResults.length > 0 && (
                 <div className="autocomplete-dropdown">
-                  {medResults.map(m => (
-                    <div key={m.unique_id} className="autocomplete-item" onClick={() => selectMedicine(m)}>
-                      <div className="font-medium">
-                        {m.brand_name} <span className="text-muted font-normal">| {m.company_name}</span>
+                  {medResults.map((m) => (
+                    <div key={m.unique_id} className="autocomplete-item" onMouseDown={() => selectMedicine(m)}>
+                      <div style={{ fontWeight: 500 }}>
+                        {m.brand_name} <span className="text-muted" style={{ fontWeight: 400 }}>· {m.company_name}</span>
                       </div>
                       <div className="item-subtitle" style={{ color: m.type === 'batch' ? 'var(--primary)' : 'var(--text-muted)' }}>
-                        {m.type === 'batch' 
-                          ? `Batch: ${m.batch_number} | Stock: ${m.quantity}` 
-                          : '+ New Batch'}
+                        {m.type === 'batch' ? `Batch: ${m.batch_number} · Stock: ${m.quantity}` : '+ New Batch'}
                       </div>
                     </div>
                   ))}
                 </div>
               )}
             </div>
+          </FormField>
 
-            <div className="form-row">
-              <div className="form-group">
-                <label className="form-label">Batch No *</label>
-                <input 
-                  type="text" className="form-input"
-                  value={currentItem.batch_number}
-                  onChange={e => setCurrentItem({...currentItem, batch_number: e.target.value})}
-                />
-              </div>
-              <div className="form-group">
-                <label className="form-label">MFG Date</label>
-                <input 
-                  type="date" className="form-input"
-                  value={currentItem.mfg_date}
-                  max={today}
-                  onChange={e => setCurrentItem({...currentItem, mfg_date: e.target.value})}
-                />
-              </div>
-              <div className="form-group">
-                <label className="form-label">Expiry Date *</label>
-                <input 
-                  type="date" className={`form-input ${isExpiryInPast ? 'input-error' : ''}`}
-                  value={currentItem.expiry_date}
-                  min={today}
-                  onChange={e => setCurrentItem({...currentItem, expiry_date: e.target.value})}
-                />
-                {isExpiryInPast && <div style={{ fontSize: 10, color: 'var(--accent-rose)', marginTop: 2 }}>Must be a future date</div>}
-                {nearExpiry && !isExpiryInPast && <div style={{ fontSize: 10, color: '#b45309', marginTop: 2 }}>⚠️ Expires in {daysToExpiry} days</div>}
-                {isMfgAfterExpiry && <div style={{ fontSize: 10, color: 'var(--accent-rose)', marginTop: 2 }}>MFG must be before expiry</div>}
-              </div>
-            </div>
+          <div className="form-row">
+            <FormField label="Batch No" required>
+              <Input value={currentItem.batch_number} onChange={(e) => setItem({ batch_number: e.target.value })} />
+            </FormField>
+            <FormField label="MFG Date" error={v.errors.mfg_date}>
+              <Input type="date" value={currentItem.mfg_date} max={todayStr()} error={!!v.errors.mfg_date} onChange={(e) => setItem({ mfg_date: e.target.value })} />
+            </FormField>
+            <FormField label="Expiry Date" required error={v.errors.expiry_date}>
+              <Input type="date" value={currentItem.expiry_date} min={todayStr()} error={!!v.errors.expiry_date} onChange={(e) => setItem({ expiry_date: e.target.value })} />
+            </FormField>
+          </div>
 
-            <div className="form-row">
-              {isTabletLike && (
-                <div className="form-group">
-                  <label className="form-label">
-                    Pack (Strips) <span className="text-muted" style={{textTransform: 'none'}}>(1×{tps})</span>
-                  </label>
-                  <input 
-                    type="number" className="form-input" min="1"
-                    value={currentItem.pack_count}
-                    placeholder="E.g. 5 strips"
-                    onChange={e => {
-                      const pack = parseInt(e.target.value) || '';
-                      setCurrentItem({
-                        ...currentItem, 
-                        pack_count: pack,
-                        quantity: pack ? pack * tps : ''
-                      });
-                    }}
-                  />
-                </div>
-              )}
-              <div className="form-group">
-                <label className="form-label">Quantity {isTabletLike && <span style={{textTransform: 'none'}}>(Total Tabs)</span>} *</label>
-                <input 
-                  type="number" className="form-input" min="1"
-                  value={currentItem.quantity}
-                  onChange={e => {
-                    const qty = parseInt(e.target.value) || '';
-                    setCurrentItem({
-                      ...currentItem, 
-                      quantity: qty,
-                      pack_count: isTabletLike && qty > 0 ? (qty / tps).toFixed(1).replace(/\.0$/, '') : ''
-                    });
+          <div className="form-row">
+            {isTabletLike && (
+              <FormField label={`Pack / Strips (1×${tps})`}>
+                <Input
+                  type="number" min="1" placeholder="e.g. 5"
+                  value={currentItem.pack_count}
+                  onChange={(e) => {
+                    const pack = parseInt(e.target.value) || '';
+                    setItem({ pack_count: pack, quantity: pack ? pack * tps : '' });
                   }}
                 />
-              </div>
-              <div className="form-group">
-                <label className="form-label">Purchase Rate {isTabletLike ? <span style={{textTransform: 'none'}}>(per strip)</span> : '(₹)'}</label>
-                <input 
-                  type="number" className={`form-input ${isPurchGreaterThanMrp ? 'input-error' : ''}`}
-                  value={currentItem.purchase_rate}
-                  onChange={e => setCurrentItem({...currentItem, purchase_rate: e.target.value})}
-                />
-                {isPurchGreaterThanMrp && <div style={{ fontSize: 10, color: 'var(--accent-rose)', marginTop: 2 }}>Cannot exceed MRP (₹{mrp})</div>}
-              </div>
-            </div>
-
-            <div className="form-row">
-              <div className="form-group">
-                <label className="form-label">MRP (₹)</label>
-                <input 
-                  type="number" className="form-input"
-                  value={currentItem.mrp}
-                  onChange={e => setCurrentItem({...currentItem, mrp: e.target.value})}
-                />
-              </div>
-              <div className="form-group">
-                <label className="form-label">
-                  Selling Rate (₹)
-                  {profitMargin !== null && <span style={{ fontSize: 10, fontWeight: 400, marginLeft: 6, color: parseFloat(profitMargin) < 5 ? 'var(--accent-rose)' : 'var(--accent-green)' }}>{profitMargin}% margin</span>}
-                  {mrpDiscount !== null && !isSellGreaterThanMrp && <span style={{ fontSize: 10, fontWeight: 400, marginLeft: 4, color: 'var(--text-secondary)' }}>| {mrpDiscount}% off MRP</span>}
-                </label>
-                <input 
-                  type="number" 
-                  className={`form-input ${isSellLessThanPurchase || isSellGreaterThanMrp ? 'input-error' : ''}`}
-                  value={currentItem.selling_rate}
-                  onChange={e => setCurrentItem({...currentItem, selling_rate: e.target.value})}
-                />
-                {isSellLessThanPurchase && <div style={{ fontSize: 10, color: 'var(--accent-rose)', marginTop: 2 }}>Cannot be less than Purchase Rate (₹{purch})</div>}
-                {isSellGreaterThanMrp && !isSellLessThanPurchase && <div style={{ fontSize: 10, color: 'var(--accent-rose)', marginTop: 2 }}>Cannot exceed MRP (₹{mrp})</div>}
-              </div>
-            </div>
-
-            <button 
-              className="btn btn-secondary w-full" 
-              onClick={addItem}
-              disabled={hasHardError}
-            >
-              {hasHardError ? '❌ Fix Errors to Add' : '+ Add to List'}
-            </button>
-          </div>
-
-          <div className="glass-card" style={{ padding: 0, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
-            <div className="p-3 border-b border-gray-100 bg-gray-50">
-              <h3 className="text-sm font-semibold">Items ({items.length})</h3>
-            </div>
-            <div className="overflow-y-auto flex-1 p-0">
-              <table className="data-table">
-                <thead>
-                  <tr>
-                    <th>Item</th>
-                    <th>Batch</th>
-                    <th>Qty</th>
-                    <th>Total</th>
-                    <th></th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {items.map(item => {
-                    const isTab = ['Tablet', 'Capsule', 'Strip'].includes(item.unit_category);
-                    const strips = isTab ? Math.floor(item.quantity / item.tablets_per_strip) : 0;
-                    const tabs = isTab ? (item.quantity % item.tablets_per_strip) : 0;
-                    const qtyStr = isTab ? `${strips > 0 ? strips + 's ' : ''}${tabs > 0 ? tabs + 't' : ''}` : item.quantity;
-                    
-                    return (
-                    <tr key={item.id}>
-                      <td>{item.medicine_name}</td>
-                      <td>{item.batch_number}</td>
-                      <td>{qtyStr}</td>
-                      <td>₹{(item.quantity * item.purchase_rate).toFixed(2)}</td>
-                      <td>
-                        <div className="flex gap-2 justify-end">
-                          <button 
-                            className="text-blue-500 hover:text-blue-700 p-1" 
-                            onClick={() => editItem(item)}
-                            title="Edit item"
-                          >
-                            <Edit2 size={14} />
-                          </button>
-                          <button 
-                            className="text-red-500 hover:text-red-700 p-1" 
-                            onClick={() => removeItem(item.id)}
-                            title="Remove item"
-                          >
-                            <Trash2 size={14} />
-                          </button>
-                        </div>
-                      </td>
-                    </tr>
-                    );
-                  })}
-                  {items.length === 0 && (
-                    <tr><td colSpan="5" className="text-center py-8 text-muted">No items added yet</td></tr>
-                  )}
-                </tbody>
-              </table>
-            </div>
-            <div className="p-3 bg-gray-50 border-t border-gray-100 text-right font-bold">
-              Total: ₹{items.reduce((sum, i) => sum + (i.quantity * i.purchase_rate), 0).toFixed(2)}
-            </div>
-          </div>
-        </div>
-
-        {/* Payment Section */}
-        <div className="glass-card mb-4" style={{ background: 'var(--surface)' }}>
-          <div style={{ paddingBottom: 12, marginBottom:16, borderBottom: '1px solid rgba(0,0,0,0.05)', fontWeight: 700, fontSize: 13, textTransform: 'uppercase', letterSpacing: 1, display: 'flex', alignItems: 'center', gap: 8 }}>
-            <CreditCard size={16} color="var(--primary)" /> Payment Details (Optional)
-          </div>
-          
-          <div className="form-row">
-            <div className="form-group">
-              <label className="form-label">Total Amount</label>
-              <div style={{ fontSize: 24, fontWeight: 800, color: 'var(--primary)' }}>₹{items.reduce((sum, i) => sum + (i.quantity * i.purchase_rate), 0).toFixed(2)}</div>
-            </div>
-            <div className="form-group">
-              <label className="form-label">Payment Mode</label>
-              <select 
-                className="form-select"
-                value={formData.payment_mode}
-                onChange={e => setFormData({...formData, payment_mode: e.target.value})}
-              >
-                <option>Cash</option>
-                <option>UPI</option>
-                <option>Bank Transfer</option>
-                <option>Cheque</option>
-              </select>
-            </div>
-            <div className="form-group">
-              <label className="form-label">Amount Paying Now</label>
-              <input 
-                type="number" 
-                className={`form-input ${amtPaidExceedsTotal ? 'input-error' : ''}`}
-                placeholder="0.00"
-                value={formData.amount_paid}
-                onChange={e => setFormData({...formData, amount_paid: e.target.value})}
-              />
-              {amtPaidExceedsTotal && (
-                <div style={{ fontSize: 11, color: 'var(--accent-rose)', marginTop: 3, fontWeight: 500 }}>
-                  Amount paid cannot exceed invoice total (₹{totalAmt.toFixed(2)})
-                </div>
-              )}
-            </div>
-            <div className="form-group">
-              <label className="form-label">Remaining Balance</label>
-              <div style={{ fontSize: 20, fontWeight: 700, color: 'var(--accent-rose)' }}>
-                ₹{(items.reduce((sum, i) => sum + (i.quantity * i.purchase_rate), 0) - (parseFloat(formData.amount_paid) || 0)).toFixed(2)}
-              </div>
-            </div>
-          </div>
-          
-          <div className="form-row">
-            <div className="form-group" style={{ flex: 2 }}>
-              <label className="form-label">Note / Reference (Optional)</label>
-              <input 
-                type="text" 
-                className="form-input"
-                placeholder="Transaction ID, Cheque No, etc."
-                value={formData.payment_notes}
-                onChange={e => setFormData({...formData, payment_notes: e.target.value})}
-              />
-            </div>
-            <div className="form-group" style={{ flex: 1 }}>
-              <label className="form-label">Payment Date</label>
-              <input 
-                type="date" 
-                className="form-input"
-                value={formData.purchase_date}
-                readOnly
-                style={{ background: 'var(--surface)', cursor: 'default' }}
-              />
-            </div>
-          </div>
-        </div>
-
-        <div className="flex justify-end gap-4">
-          <button className="btn btn-secondary" onClick={() => setView('list')}>Cancel</button>
-          <button 
-            className="btn btn-primary" 
-            style={{ padding: '12px 40px' }} 
-            onClick={handleSubmit}
-            disabled={amtPaidExceedsTotal}
-          >
-            {amtPaidExceedsTotal ? '❌ Fix Amount Paid' : 'Save Purchase & Payment'}
-          </button>
-        </div>
-      </div>
-    );
-  }
-
-  if (view === 'detail' && selectedPurchase) {
-    return (
-      <div>
-        <div className="toolbar">
-          <div className="toolbar-left">
-            <button className="btn btn-secondary" onClick={() => setView('list')}>← Back</button>
-            <h2 className="section-title mb-0">Purchase Details #{selectedPurchase.id}</h2>
-          </div>
-          <button className="btn btn-primary" onClick={handleEditPurchase}>
-            <Eye size={16} style={{display: 'none'}} /> Edit Purchase
-          </button>
-        </div>
-
-        <div className="glass-card mb-4">
-          <div className="grid grid-cols-2 gap-4">
-            <div>
-              <div className="text-muted text-xs">Supplier</div>
-              <div className="font-medium">{selectedPurchase.supplier_name}</div>
-            </div>
-            <div>
-              <div className="text-muted text-xs">Invoice No</div>
-              <div className="font-medium">{selectedPurchase.invoice_number}</div>
-            </div>
-            <div>
-              <div className="text-muted text-xs">Date</div>
-              <div className="font-medium">{selectedPurchase.purchase_date}</div>
-            </div>
-            <div>
-              <div className="text-muted text-xs">Total Amount</div>
-              <div className="font-bold text-lg text-primary">₹{selectedPurchase.total_amount.toFixed(2)}</div>
-            </div>
-            <div>
-              <div className="text-muted text-xs">Amount Paid</div>
-              <div className="font-bold text-lg text-green-600">₹{(selectedPurchase.amount_paid || 0).toFixed(2)}</div>
-            </div>
-            <div>
-              <div className="text-muted text-xs">Remaining Balance</div>
-              <div className="font-bold text-lg text-rose-600">₹{(selectedPurchase.total_amount - (selectedPurchase.amount_paid || 0)).toFixed(2)}</div>
-            </div>
-          </div>
-        </div>
-
-        <div className="glass-card" style={{ padding: 0 }}>
-          <table className="data-table">
-            <thead>
-              <tr>
-                <th>Medicine</th>
-                <th>Batch</th>
-                <th>Expiry</th>
-                <th>Qty</th>
-                <th>Rate</th>
-                <th>MRP</th>
-                <th>Total</th>
-              </tr>
-            </thead>
-            <tbody>
-              {selectedPurchase.items && selectedPurchase.items.map((item, i) => (
-                <tr key={i}>
-                  <td>{item.brand_name}</td>
-                  <td>{item.batch_number}</td>
-                  <td>{item.expiry_date}</td>
-                  <td>{item.quantity}</td>
-                  <td>{item.purchase_rate}</td>
-                  <td>{item.mrp}</td>
-                  <td>{(item.quantity * item.purchase_rate).toFixed(2)}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      </div>
-    );
-  }
-
-  return (
-    <div>
-      <div className="toolbar">
-        <h2 className="section-title">Purchase History</h2>
-        <button className="btn btn-primary" onClick={() => setView('create')}>
-          <Plus size={16} /> New Purchase
-        </button>
-      </div>
-
-      <div className="glass-card" style={{ padding: 0 }}>
-        <table className="data-table">
-          <thead>
-            <tr>
-              <th>Date</th>
-              <th>Supplier</th>
-              <th>Invoice No</th>
-              <th>Paid Amt</th>
-              <th>Total Amount</th>
-              <th className="text-center">Status</th>
-              <th>Action</th>
-            </tr>
-          </thead>
-          <tbody>
-            {loading ? (
-              <tr><td colSpan="7" className="text-center">Loading...</td></tr>
-            ) : purchases.length === 0 ? (
-              <tr><td colSpan="7" className="text-center">No purchases found</td></tr>
-            ) : (
-              purchases.map(p => {
-                const isPaid = (p.amount_paid || 0) >= p.total_amount;
-                const isPartial = (p.amount_paid || 0) > 0 && (p.amount_paid || 0) < p.total_amount;
-                const isUnpaid = (p.amount_paid || 0) === 0;
-
-                return (
-                  <tr key={p.id}>
-                    <td>{p.purchase_date.slice(0, 10)}</td>
-                    <td>{p.supplier_name}</td>
-                    <td>{p.invoice_number}</td>
-                    <td>₹{(p.amount_paid || 0).toFixed(2)}</td>
-                    <td className="font-medium">₹{p.total_amount.toFixed(2)}</td>
-                    <td className="text-center">
-                      <span className={`badge ${isPaid ? 'badge-green' : isPartial ? 'badge-yellow' : 'badge-red'}`}>
-                        {isPaid ? 'Paid' : isPartial ? 'Partial' : 'Unpaid'}
-                      </span>
-                    </td>
-                    <td>
-                      <button className="btn btn-secondary btn-sm" onClick={() => viewDetail(p.id)}>
-                        <Eye size={14} /> View
-                      </button>
-                    </td>
-                  </tr>
-                );
-              })
+              </FormField>
             )}
-          </tbody>
-        </table>
+            <FormField label={`Quantity${isTabletLike ? ' (total tabs)' : ''}`} required>
+              <Input
+                type="number" min="1"
+                value={currentItem.quantity}
+                onChange={(e) => {
+                  const qty = parseInt(e.target.value) || '';
+                  setItem({ quantity: qty, pack_count: isTabletLike && qty > 0 ? (qty / tps).toFixed(1).replace(/\.0$/, '') : '' });
+                }}
+              />
+            </FormField>
+            <FormField label={`Purchase Rate${isTabletLike ? ' /strip' : ''}`} error={v.errors.purchase_rate}>
+              <Input type="number" step="0.01" min="0" error={!!v.errors.purchase_rate} value={currentItem.purchase_rate} onChange={(e) => setItem({ purchase_rate: e.target.value })} />
+            </FormField>
+          </div>
+
+          <div className="form-row">
+            <FormField label="MRP (₹/strip)">
+              <Input type="number" step="0.01" min="0" value={currentItem.mrp} onChange={(e) => setItem({ mrp: e.target.value })} />
+            </FormField>
+            <FormField
+              label={`Selling Rate${v.margin != null ? ` · ${v.margin.toFixed(1)}% margin` : ''}${v.mrpDiscount != null && !v.errors.selling_rate ? ` · ${v.mrpDiscount.toFixed(1)}% off` : ''}`}
+              error={v.errors.selling_rate}
+            >
+              <Input type="number" step="0.01" min="0" error={!!v.errors.selling_rate} value={currentItem.selling_rate} onChange={(e) => setItem({ selling_rate: e.target.value })} />
+            </FormField>
+          </div>
+
+          {v.warnings.length > 0 && !v.hasError && (
+            <div className="alert alert-yellow mb-2">
+              {v.warnings.map((w, i) => <div key={i} style={{ fontWeight: 500 }}>⚠️ {w}</div>)}
+            </div>
+          )}
+
+          <Button variant="secondary" className="w-full" icon={Plus} disabled={v.hasError} onClick={addItem}>
+            {v.hasError ? 'Fix errors to add' : 'Add to List'}
+          </Button>
+        </div>
+
+        {/* Items list */}
+        <div className="glass-card" style={{ padding: 0, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
+          <div style={{ padding: '12px 16px', borderBottom: '1px solid var(--border)', fontWeight: 600, fontSize: 13 }}>
+            Items ({items.length})
+          </div>
+          <div style={{ flex: 1, overflowY: 'auto' }}>
+            <DataTable
+              columns={itemColumns}
+              rows={items}
+              empty={<EmptyState icon={ShoppingCart} title="No items yet" message="Search a medicine and add it to this purchase." height={160} />}
+            />
+          </div>
+          <div style={{ padding: '12px 16px', borderTop: '1px solid var(--border)', textAlign: 'right', fontWeight: 700 }}>
+            Total: {money(total)}
+          </div>
+        </div>
+      </div>
+
+      {/* Payment */}
+      <div className="glass-card mb-4">
+        <div style={{ paddingBottom: 12, marginBottom: 16, borderBottom: '1px solid var(--border)', fontWeight: 700, fontSize: 13, textTransform: 'uppercase', letterSpacing: 1, display: 'flex', alignItems: 'center', gap: 8 }}>
+          <CreditCard size={16} style={{ color: 'var(--primary)' }} /> Payment Details (Optional)
+        </div>
+        <div className="form-row">
+          <FormField label="Total Amount">
+            <div style={{ fontSize: 22, fontWeight: 800, color: 'var(--primary)' }}>{money(total)}</div>
+          </FormField>
+          <FormField label="Payment Mode">
+            <Select value={formData.payment_mode} onChange={(e) => setFormData({ ...formData, payment_mode: e.target.value })}>
+              <option>Cash</option><option>UPI</option><option>Bank Transfer</option><option>Cheque</option>
+            </Select>
+          </FormField>
+          <FormField label="Amount Paying Now" error={amtPaidExceedsTotal ? `Cannot exceed total (${money(total)})` : undefined}>
+            <Input type="number" step="0.01" min="0" placeholder="0.00" error={amtPaidExceedsTotal} value={formData.amount_paid} onChange={(e) => setFormData({ ...formData, amount_paid: e.target.value })} />
+          </FormField>
+          <FormField label="Remaining Balance">
+            <div style={{ fontSize: 20, fontWeight: 700, color: 'var(--danger)' }}>{money(total - amtPaid)}</div>
+          </FormField>
+        </div>
+        <div className="form-row">
+          <FormField label="Note / Reference (optional)" style={{ flex: 2 }}>
+            <Input placeholder="Transaction ID, cheque no, etc." value={formData.payment_notes} onChange={(e) => setFormData({ ...formData, payment_notes: e.target.value })} />
+          </FormField>
+          <FormField label="Payment Date">
+            <Input type="date" value={formData.purchase_date} readOnly style={{ background: 'var(--bg-subtle)', cursor: 'default' }} />
+          </FormField>
+        </div>
+      </div>
+
+      <div className="flex gap-2" style={{ justifyContent: 'flex-end' }}>
+        <Button variant="secondary" onClick={onCancel}>Cancel</Button>
+        <Button variant="primary" loading={saving} disabled={amtPaidExceedsTotal} onClick={handleSubmit} style={{ padding: '10px 36px' }}>
+          {formData.id ? 'Save Changes' : 'Save Purchase & Payment'}
+        </Button>
       </div>
     </div>
   );
