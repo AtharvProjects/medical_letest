@@ -1,7 +1,7 @@
 node_modules/
 dist/
 dist-electron/
-build/
+build/*
 !build/uninstaller.nsh
 *.dmg
 *.zip
