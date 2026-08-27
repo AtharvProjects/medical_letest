@@ -138,18 +138,50 @@ export default function Billing() {
   // Clear the review-timer interval on unmount.
   useEffect(() => () => { if (timerRef.current) clearInterval(timerRef.current); }, []);
 
-  const medFuse = useMemo(
-    () => new Fuse(medicines, { keys: ['alias', 'brand_name', 'generic_name', 'company_name'], threshold: 0.2, distance: 100 }),
-    [medicines]
-  );
   const custFuse = useMemo(() => new Fuse(customers, { keys: ['name', 'phone'], threshold: 0.3 }), [customers]);
 
   useEffect(() => {
-    if (!medSearch.trim()) { setSuggestions([]); setShowSuggestions(false); return; }
-    const filtered = medFuse.search(medSearch).map((r) => r.item).slice(0, 10);
-    setSuggestions(filtered);
-    setShowSuggestions(filtered.length > 0);
-  }, [medSearch, medFuse]);
+    const query = medSearch.trim();
+    if (!query) {
+      setSuggestions([]);
+      setShowSuggestions(false);
+      return;
+    }
+
+    // Fast-path for small in-memory list
+    if (medicines.length > 0 && medicines.length <= 2000) {
+      const q = query.toLowerCase();
+      const matches = [];
+      for (let i = 0; i < medicines.length; i++) {
+        const m = medicines[i];
+        if (
+          (m.alias && m.alias.toLowerCase().includes(q)) ||
+          (m.brand_name && m.brand_name.toLowerCase().includes(q)) ||
+          (m.generic_name && m.generic_name.toLowerCase().includes(q)) ||
+          (m.company_name && m.company_name.toLowerCase().includes(q))
+        ) {
+          matches.push(m);
+          if (matches.length >= 10) break;
+        }
+      }
+      setSuggestions(matches);
+      setShowSuggestions(matches.length > 0);
+      return;
+    }
+
+    // High-performance indexed SQLite search for large databases (1 Lakh+ medicines)
+    const timer = setTimeout(() => {
+      api.getMedicines({ search: query, limit: 10, active_only: 'true' })
+        .then((res) => {
+          const list = res?.data || (Array.isArray(res) ? res.slice(0, 10) : []);
+          setSuggestions(list);
+          setShowSuggestions(list.length > 0);
+        })
+        .catch(() => {});
+    }, 100);
+
+    return () => clearTimeout(timer);
+  }, [medSearch, medicines]);
 
   const filteredCustomers = useMemo(() => {
     if (!custSearch.trim()) return customers;

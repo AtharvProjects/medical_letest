@@ -41,12 +41,19 @@ export const api = {
   updateSettings: (data) => request('/settings', { method: 'PUT', body: JSON.stringify(data) }),
 
   // Medicines
-  getMedicines: (search = '') => request(`/medicines?search=${encodeURIComponent(search)}`),
+  getMedicines: (params = '') => {
+    if (typeof params === 'string') {
+      return request(`/medicines?search=${encodeURIComponent(params)}`);
+    }
+    const q = new URLSearchParams(params).toString();
+    return request(`/medicines?${q}`);
+  },
+  getMedicinesStats: () => request('/medicines-stats'),
   getMedicineCategories: () => request('/medicines-categories'),
   getMedicine: (id) => request(`/medicines/${id}`),
-    createMedicine: (data) => request('/medicines', { method: 'POST', body: JSON.stringify(data) }),
-    updateMedicine: (id, data) => request(`/medicines/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
-    deleteMedicine: (id) => request(`/medicines/${id}`, { method: 'DELETE' }),
+  createMedicine: (data) => request('/medicines', { method: 'POST', body: JSON.stringify(data) }),
+  updateMedicine: (id, data) => request(`/medicines/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
+  deleteMedicine: (id) => request(`/medicines/${id}`, { method: 'DELETE' }),
   
     // Batches
     getBatches: (params = {}) => {

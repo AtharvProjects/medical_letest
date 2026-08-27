@@ -9,8 +9,12 @@ fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
 
 const db = new Database(DB_PATH);
 
-// Enable WAL mode for better performance
+// High-Performance SQLite Configuration for 100,000+ records
 db.pragma('journal_mode = WAL');
+db.pragma('synchronous = NORMAL');
+db.pragma('cache_size = -64000'); // 64 MB in-memory cache
+db.pragma('temp_store = MEMORY');
+db.pragma('mmap_size = 268435456'); // 256 MB Memory Mapped I/O
 db.pragma('foreign_keys = ON');
 
 // Create all tables (Consolidated Schema)
@@ -173,13 +177,20 @@ db.exec(`
     FOREIGN KEY (invoice_id) REFERENCES invoices(id) ON DELETE CASCADE
   );
 
+  -- High-performance composite indexes
   CREATE INDEX IF NOT EXISTS idx_medicines_brand ON medicines(brand_name);
+  CREATE INDEX IF NOT EXISTS idx_medicines_brand_nocase ON medicines(brand_name COLLATE NOCASE);
+  CREATE INDEX IF NOT EXISTS idx_medicines_alias ON medicines(alias);
+  CREATE INDEX IF NOT EXISTS idx_medicines_active ON medicines(is_active);
   CREATE INDEX IF NOT EXISTS idx_batches_medicine ON batches(medicine_id);
+  CREATE INDEX IF NOT EXISTS idx_batches_med_batch ON batches(medicine_id, batch_number);
+  CREATE INDEX IF NOT EXISTS idx_batches_med_qty ON batches(medicine_id, quantity);
   CREATE INDEX IF NOT EXISTS idx_batches_expiry ON batches(expiry_date);
   CREATE INDEX IF NOT EXISTS idx_invoices_date ON invoices(created_at);
   CREATE INDEX IF NOT EXISTS idx_invoices_customer ON invoices(customer_id);
   CREATE INDEX IF NOT EXISTS idx_invoice_items_invoice ON invoice_items(invoice_id);
   CREATE INDEX IF NOT EXISTS idx_customers_phone ON customers(phone);
+  CREATE INDEX IF NOT EXISTS idx_customers_name ON customers(name);
 
   CREATE TABLE IF NOT EXISTS audit_logs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -206,7 +217,6 @@ db.exec(`
 `);
 
 // ---- Lightweight, idempotent migrations for databases created before a column existed.
-// (CREATE TABLE IF NOT EXISTS never alters an existing table, so we add missing columns here.)
 function ensureColumn(table, column, ddl) {
   const cols = db.prepare(`PRAGMA table_info(${table})`).all();
   if (!cols.some((c) => c.name === column)) {
@@ -234,3 +244,4 @@ for (const [key, value] of Object.entries(defaults)) {
 
 db.DB_PATH = DB_PATH;
 module.exports = db;
+

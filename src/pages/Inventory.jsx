@@ -42,7 +42,14 @@ function ExpiryCell({ date, alertDays }) {
 export default function Inventory() {
   const [medicines, setMedicines] = useState([]);
   const [search, setSearch] = useState('');
+  const [debouncedSearch, setDebouncedSearch] = useState('');
   const [loading, setLoading] = useState(true);
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(50);
+  const [total, setTotal] = useState(0);
+  const [totalPages, setTotalPages] = useState(1);
+
+  const [stats, setStats] = useState({ total: 0, low: 0, out: 0, expiring: 0 });
   const [lowThreshold, setLowThreshold] = useState(10);
   const [alertDays, setAlertDays] = useState(90);
 
@@ -51,6 +58,7 @@ export default function Inventory() {
   const [batchMedicine, setBatchMedicine] = useState(null);
   const [confirmDeleteMed, setConfirmDeleteMed] = useState(null);
   const [deleting, setDeleting] = useState(false);
+  const [uploading, setUploading] = useState(false);
   const [csvResult, setCsvResult] = useState(null);
   const [csvMode, setCsvMode] = useState('import');
 
@@ -58,17 +66,56 @@ export default function Inventory() {
   const updateRef = useRef(null);
   const showToast = useToast();
 
-  const load = useCallback(() => {
+  // Debounce search input by 150ms for instant typing response
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      setDebouncedSearch(search);
+      setPage(1);
+    }, 150);
+    return () => clearTimeout(timer);
+  }, [search]);
+
+  // Load paginated data
+  const loadData = useCallback(() => {
     setLoading(true);
-    api.getMedicines()
-      .then(setMedicines)
+    api.getMedicines({ page, limit: pageSize, search: debouncedSearch })
+      .then((res) => {
+        if (res && res.data) {
+          setMedicines(res.data);
+          setTotal(res.total || 0);
+          setTotalPages(res.totalPages || 1);
+        } else if (Array.isArray(res)) {
+          setMedicines(res);
+          setTotal(res.length);
+          setTotalPages(Math.ceil(res.length / pageSize) || 1);
+        }
+      })
       .catch(() => showToast('Failed to load medicines', 'error'))
       .finally(() => setLoading(false));
-  }, [showToast]);
+  }, [page, pageSize, debouncedSearch, showToast]);
 
-  useEffect(() => { load(); }, [load]);
+  // Load stats from lightweight SQLite aggregate query
+  const loadStats = useCallback(() => {
+    api.getMedicinesStats()
+      .then((s) => {
+        if (s) {
+          setStats(s);
+          if (s.lowThreshold) setLowThreshold(s.lowThreshold);
+          if (s.alertDays) setAlertDays(s.alertDays);
+        }
+      })
+      .catch(() => {});
+  }, []);
 
-  // Thresholds come from Settings so the whole app agrees on "low" and "expiring".
+  const load = useCallback(() => {
+    loadData();
+    loadStats();
+  }, [loadData, loadStats]);
+
+  useEffect(() => { loadData(); }, [loadData]);
+  useEffect(() => { loadStats(); }, [loadStats]);
+
+  // Thresholds from Settings
   useEffect(() => {
     api.getSettings()
       .then((s) => {
@@ -77,33 +124,8 @@ export default function Inventory() {
         if (!isNaN(low)) setLowThreshold(low);
         if (!isNaN(days)) setAlertDays(days);
       })
-      .catch(() => {/* keep defaults */});
+      .catch(() => {});
   }, []);
-
-  const fuse = useMemo(
-    () => new Fuse(medicines, { keys: ['alias', 'brand_name', 'generic_name', 'company_name', 'drug_group'], threshold: 0.3 }),
-    [medicines]
-  );
-
-  const filteredMedicines = useMemo(() => {
-    if (!search.trim()) return medicines;
-    return fuse.search(search).map((r) => r.item);
-  }, [search, medicines, fuse]);
-
-  const stats = useMemo(() => {
-    const today = todayStr();
-    let low = 0, out = 0, expiring = 0;
-    for (const m of medicines) {
-      const stock = Number(m.total_stock) || 0;
-      if (stock <= 0) out++;
-      else if (stock <= lowThreshold) low++;
-      if (m.nearest_expiry && m.nearest_expiry >= today) {
-        const d = daysUntil(m.nearest_expiry);
-        if (d != null && d <= alertDays) expiring++;
-      }
-    }
-    return { total: medicines.length, low, out, expiring };
-  }, [medicines, lowThreshold, alertDays]);
 
   const openAdd = () => { setEditMed(null); setShowForm(true); };
   const openEdit = (m) => { setEditMed(m); setShowForm(true); };
@@ -133,6 +155,7 @@ export default function Inventory() {
 
   const handleExportCSV = async () => {
     try {
+      showToast('Exporting medicines…');
       const csv = await api.exportMedicinesCSV();
       downloadCSV(exportFilename('medicines_inventory'), csv);
       showToast('Medicines exported successfully');
@@ -143,26 +166,36 @@ export default function Inventory() {
     const file = e.target.files[0];
     if (!file) return;
     e.target.value = '';
+    setUploading(true);
     try {
       const text = await readFileAsText(file);
       const result = await api.importMedicinesCSV(text);
       setCsvMode('import');
       setCsvResult(result);
       load();
-    } catch (err) { showToast(err.message, 'error'); }
+    } catch (err) {
+      showToast(err.message, 'error');
+    } finally {
+      setUploading(false);
+    }
   };
 
   const handleCSVUpdate = async (e) => {
     const file = e.target.files[0];
     if (!file) return;
     e.target.value = '';
+    setUploading(true);
     try {
       const text = await readFileAsText(file);
       const result = await api.updateMedicinesCSV(text);
       setCsvMode('update');
       setCsvResult(result);
       load();
-    } catch (err) { showToast(err.message, 'error'); }
+    } catch (err) {
+      showToast(err.message, 'error');
+    } finally {
+      setUploading(false);
+    }
   };
 
   const columns = [
@@ -237,7 +270,15 @@ export default function Inventory() {
         <DataTable
           loading={loading}
           columns={columns}
-          rows={filteredMedicines}
+          rows={medicines}
+          pagination={{
+            page,
+            pageSize,
+            total,
+            totalPages,
+            onPageChange: setPage,
+            onPageSizeChange: (s) => { setPageSize(s); setPage(1); },
+          }}
           empty={
             <EmptyState
               icon={Package}
@@ -248,6 +289,37 @@ export default function Inventory() {
           }
         />
       </div>
+
+      {uploading && (
+        <div style={{
+          position: 'fixed',
+          inset: 0,
+          background: 'rgba(0, 0, 0, 0.4)',
+          backdropFilter: 'blur(4px)',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          zIndex: 9999,
+        }}>
+          <div style={{
+            background: 'var(--bg-card, #ffffff)',
+            borderRadius: 14,
+            padding: '24px 32px',
+            boxShadow: '0 20px 40px rgba(0,0,0,0.2)',
+            display: 'flex',
+            flexDirection: 'column',
+            alignItems: 'center',
+            gap: 16,
+            minWidth: 320,
+          }}>
+            <div className="spinner" style={{ width: 36, height: 36, borderWidth: 3 }} />
+            <div style={{ textAlign: 'center' }}>
+              <div style={{ fontSize: 16, fontWeight: 700, marginBottom: 4 }}>Processing Medicines CSV</div>
+              <div style={{ fontSize: 13, color: 'var(--text-secondary)' }}>Updating stock, rates, and batch details…</div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {showForm && (
         <MedicineModal

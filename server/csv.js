@@ -12,98 +12,93 @@
 // ── Parse ────────────────────────────────────────────────────────────────────
 
 /**
- * Parse a CSV string into an array of plain objects keyed by normalised headers.
+ * High-Performance Single-Pass CSV Parser
+ * Handles BOM, CRLF, embedded quotes, and multi-line fields in O(N) time with minimal allocations.
  * @param {string} text  Raw CSV text
  * @returns {{ headers: string[], rows: object[] }}
  */
 function parseCSV(text) {
-  // Strip BOM
+  if (typeof text !== 'string') return { headers: [], rows: [] };
   if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1);
+  const len = text.length;
+  if (!len) return { headers: [], rows: [] };
 
-  const lines = splitCSVLines(text);
-  if (lines.length === 0) return { headers: [], rows: [] };
+  const rawRows = [];
+  let currentRow = [];
+  let inQuotes = false;
+  let fieldStart = 0;
+  let isEscaped = false;
 
-  const rawHeaders = parseCSVRow(lines[0]);
+  for (let i = 0; i < len; i++) {
+    const ch = text.charCodeAt(i);
+
+    if (ch === 34) { // "
+      if (inQuotes && text.charCodeAt(i + 1) === 34) {
+        isEscaped = true;
+        i++; // skip escaped quote
+      } else {
+        inQuotes = !inQuotes;
+      }
+    } else if (ch === 44 && !inQuotes) { // ,
+      let val = text.slice(fieldStart, i).trim();
+      if (val.charCodeAt(0) === 34 && val.charCodeAt(val.length - 1) === 34) {
+        val = val.slice(1, -1);
+      }
+      if (isEscaped) val = val.replace(/""/g, '"');
+      currentRow.push(val.trim());
+      fieldStart = i + 1;
+      isEscaped = false;
+    } else if ((ch === 10 || ch === 13) && !inQuotes) { // \n or \r
+      let val = text.slice(fieldStart, i).trim();
+      if (val.charCodeAt(0) === 34 && val.charCodeAt(val.length - 1) === 34) {
+        val = val.slice(1, -1);
+      }
+      if (isEscaped) val = val.replace(/""/g, '"');
+      currentRow.push(val.trim());
+      fieldStart = i + 1;
+      isEscaped = false;
+
+      if (ch === 13 && text.charCodeAt(i + 1) === 10) {
+        i++;
+        fieldStart = i + 1;
+      }
+
+      if (currentRow.length > 1 || (currentRow.length === 1 && currentRow[0] !== '')) {
+        rawRows.push(currentRow);
+      }
+      currentRow = [];
+    }
+  }
+
+  // Handle trailing field
+  if (fieldStart < len || currentRow.length > 0) {
+    let val = text.slice(fieldStart).trim();
+    if (val.charCodeAt(0) === 34 && val.charCodeAt(val.length - 1) === 34) {
+      val = val.slice(1, -1);
+    }
+    if (isEscaped) val = val.replace(/""/g, '"');
+    currentRow.push(val.trim());
+    if (currentRow.length > 1 || (currentRow.length === 1 && currentRow[0] !== '')) {
+      rawRows.push(currentRow);
+    }
+  }
+
+  if (rawRows.length === 0) return { headers: [], rows: [] };
+
+  const rawHeaders = rawRows[0];
   const headers = rawHeaders.map(normaliseHeader);
-
   const rows = [];
-  for (let i = 1; i < lines.length; i++) {
-    const line = lines[i].trim();
-    if (!line) continue;
-    const values = parseCSVRow(line);
+
+  for (let r = 1; r < rawRows.length; r++) {
+    const vals = rawRows[r];
     const obj = {};
-    headers.forEach((h, idx) => {
-      obj[h] = (values[idx] ?? '').trim();
-    });
+    for (let c = 0; c < headers.length; c++) {
+      obj[headers[c]] = vals[c] ?? '';
+    }
     rows.push(obj);
   }
 
   return { headers, rows };
-}
-
-/**
- * Split raw CSV text into logical lines (respecting quoted fields that span
- * multiple lines).
- */
-function splitCSVLines(text) {
-  const lines = [];
-  let current = '';
-  let inQuotes = false;
-
-  for (let i = 0; i < text.length; i++) {
-    const ch = text[i];
-
-    if (ch === '"') {
-      inQuotes = !inQuotes;
-      current += ch;
-    } else if ((ch === '\n' || ch === '\r') && !inQuotes) {
-      lines.push(current);
-      current = '';
-      // Skip \r\n pair
-      if (ch === '\r' && text[i + 1] === '\n') i++;
-    } else {
-      current += ch;
-    }
-  }
-  if (current.trim()) lines.push(current);
-  return lines;
-}
-
-/**
- * Parse a single CSV row into an array of field values.
- */
-function parseCSVRow(line) {
-  const fields = [];
-  let current = '';
-  let inQuotes = false;
-
-  for (let i = 0; i < line.length; i++) {
-    const ch = line[i];
-
-    if (inQuotes) {
-      if (ch === '"') {
-        if (line[i + 1] === '"') {
-          current += '"';
-          i++; // skip escaped quote
-        } else {
-          inQuotes = false;
-        }
-      } else {
-        current += ch;
-      }
-    } else {
-      if (ch === '"') {
-        inQuotes = true;
-      } else if (ch === ',') {
-        fields.push(current);
-        current = '';
-      } else {
-        current += ch;
-      }
-    }
-  }
-  fields.push(current);
-  return fields;
 }
 
 /**
