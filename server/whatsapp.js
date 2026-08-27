@@ -426,7 +426,7 @@ const initWhatsApp = (app) => {
   app.post('/api/whatsapp/test-message', async (req, res) => {
     const { phone } = req.body;
     if (connectionStatus !== 'READY' || !client) {
-      return res.status(400).json({ error: 'WhatsApp is not connected. Please connect first.' });
+      return res.status(400).json({ error: 'WhatsApp is not connected. Please connect in Settings > WhatsApp.' });
     }
 
     const e164 = normalizePhone(phone);
@@ -435,15 +435,21 @@ const initWhatsApp = (app) => {
     }
 
     try {
-      const numberId = await client.getNumberId(e164);
-      if (!numberId) {
-        return res.status(400).json({ error: `Phone number ${phone} is not registered on WhatsApp.` });
+      let targetChatId = `${e164}@c.us`;
+      try {
+        const numberId = await client.getNumberId(e164);
+        if (numberId && numberId._serialized) {
+          targetChatId = numberId._serialized;
+        }
+      } catch (e) {
+        console.log('[WA] getNumberId notice (using direct chatId):', targetChatId);
       }
 
       const text = `👋 Hello! This is a test message from AthassMediSync Pharmacy Management System. Your WhatsApp integration is working perfectly!`;
-      await client.sendMessage(numberId._serialized, text);
+      await client.sendMessage(targetChatId, text);
       res.json({ success: true, message: `Test message sent to +${e164}` });
     } catch (err) {
+      console.error('[WA] Test message error:', err.message);
       res.status(500).json({ error: err.message });
     }
   });
@@ -469,47 +475,38 @@ const initWhatsApp = (app) => {
     }
 
     try {
-      // Validate client state
-      const state = await client.getState();
-      if (state !== 'CONNECTED') {
-        connectionStatus = 'DISCONNECTED';
-        scheduleReconnect();
-        return res.status(400).json({
-          error: 'WhatsApp session disconnected. Reconnecting in background — please try again in a few moments.',
-        });
+      let targetChatId = `${e164}@c.us`;
+      try {
+        const numberId = await client.getNumberId(e164);
+        if (numberId && numberId._serialized) {
+          targetChatId = numberId._serialized;
+        }
+      } catch (e) {
+        console.log('[WA] getNumberId notice (using direct chatId):', targetChatId);
       }
 
-      const numberId = await client.getNumberId(e164);
-      if (!numberId) {
-        return res.status(400).json({
-          error: `Customer phone number (${phone}) is not registered on WhatsApp.`,
-        });
-      }
-
+      console.log(`[WA] Sending PDF invoice (${filename || 'Invoice.pdf'}) to ${targetChatId}...`);
       const media = new MessageMedia('application/pdf', base64Content, filename || 'Invoice.pdf');
-      await client.sendMessage(numberId._serialized, media, {
+      
+      await client.sendMessage(targetChatId, media, {
         caption: message || 'Here is your invoice. Thank you for your business!',
+        sendMediaAsDocument: true,
       });
 
-      res.json({ success: true, to: numberId._serialized });
+      console.log(`[WA] PDF invoice successfully dispatched to ${targetChatId}`);
+      res.json({ success: true, to: targetChatId });
     } catch (err) {
       console.error('[WA] Send PDF error:', err.message);
       const msg = err.message || String(err);
-      const isDetached =
-        msg.includes('detached') ||
-        msg.includes('Execution context') ||
-        msg.includes('Target closed') ||
-        msg.includes('Session closed');
+      const isFatal = msg.includes('Target closed') || msg.includes('Session closed');
 
-      if (isDetached) {
+      if (isFatal) {
         connectionStatus = 'DISCONNECTED';
         scheduleReconnect();
       }
 
       res.status(500).json({
-        error: isDetached
-          ? 'WhatsApp browser session encountered a glitch. Auto-reconnecting — please retry in a moment.'
-          : msg,
+        error: `Could not send WhatsApp PDF: ${msg}`,
       });
     }
   });

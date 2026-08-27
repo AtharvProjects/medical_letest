@@ -2,7 +2,7 @@ import React, { useState, useEffect, useMemo } from 'react';
 import { api } from '../services/api';
 import { useToast } from '../App';
 import { Eye, Printer, FileText, Send, Trash2, Filter, Receipt } from 'lucide-react';
-import { generateInvoicePDF, sendInvoiceViaWhatsApp } from '../services/pdf';
+import { generateInvoicePDF, sendInvoiceViaWhatsApp, openWhatsAppWebInvoice } from '../services/pdf';
 import { inr, money, formatDate } from '../utils/format';
 import {
   Button, Modal, DataTable, Badge, EmptyState, SearchInput, FormField, Input, ConfirmDialog, Spinner,
@@ -103,7 +103,13 @@ export default function Bills() {
       await sendInvoiceViaWhatsApp(full, settings);
       showToast('Invoice sent via WhatsApp successfully!', 'success');
     } catch (err) {
-      showToast(err.message || 'Failed to send WhatsApp message. Ensure WhatsApp is connected in Settings.', 'error');
+      console.error(err);
+      const msg = err.message || 'Could not send WhatsApp message.';
+      showToast(msg, 'error');
+      if (window.confirm(`${msg}\n\nWould you like to open WhatsApp Web to send this invoice?`)) {
+        const full = await api.getInvoice(inv.id).catch(() => inv);
+        openWhatsAppWebInvoice(full, settings);
+      }
     } finally {
       setSendingWhatsApp(null);
     }

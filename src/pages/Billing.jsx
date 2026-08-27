@@ -5,7 +5,7 @@ import {
   Search, Trash2, Printer, FileText, Send, X, UserPlus, Stethoscope,
   CheckCircle2, ShoppingCart,
 } from 'lucide-react';
-import { generateInvoicePDF, sendInvoiceViaWhatsApp } from '../services/pdf';
+import { generateInvoicePDF, sendInvoiceViaWhatsApp, openWhatsAppWebInvoice } from '../services/pdf';
 import { calculateLineTotal, splitInclusive, round2 } from '../utils/billing';
 import { money, todayStr } from '../utils/format';
 import Fuse from 'fuse.js';
@@ -430,14 +430,19 @@ export default function Billing() {
   const handleWhatsApp = async () => {
     if (!lastInvoice) return;
     const phone = lastInvoice.customer_phone || selectedCustomer?.phone || '';
-    if (!phone) { showToast('No customer phone number available', 'warning'); return; }
+    if (!phone) { showToast('No customer phone number available for WhatsApp', 'warning'); return; }
     setSendingWhatsApp(true);
     try {
       await sendInvoiceViaWhatsApp(lastInvoice, settings);
       showToast('Invoice sent via WhatsApp successfully!', 'success');
     } catch (err) {
       console.error(err);
-      showToast(err.message || 'Failed to send WhatsApp message. Ensure WhatsApp is connected in Settings.', 'error');
+      const msg = err.message || 'Could not send WhatsApp message.';
+      showToast(msg, 'error');
+      // If direct WhatsApp failed, offer 1-click fallback to WhatsApp Web
+      if (window.confirm(`${msg}\n\nWould you like to open WhatsApp Web to send this invoice to +${phone}?`)) {
+        openWhatsAppWebInvoice(lastInvoice, settings);
+      }
     } finally {
       setSendingWhatsApp(false);
     }
