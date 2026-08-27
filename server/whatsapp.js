@@ -1,383 +1,518 @@
+/**
+ * AthassMediSync — Production WhatsApp Integration
+ * Built on whatsapp-web.js + Puppeteer with robust session lifecycle management,
+ * Windows Chrome/Edge detection, auto-reconnect, and one-click session reset.
+ */
+
 const { Client, LocalAuth, MessageMedia } = require('whatsapp-web.js');
 const qrcode = require('qrcode');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const { exec } = require('child_process');
 
-// ─── Suppress non-fatal Puppeteer context errors ─────────────────────────────
+// ── Suppress non-fatal transient Puppeteer context rejections ──────────────────
 process.on('unhandledRejection', (reason) => {
-    if (reason && reason.message &&
-        (reason.message.includes('Execution context was destroyed') ||
-         reason.message.includes('Protocol error') ||
-         reason.message.includes('Target closed'))) {
-        console.warn('[WA] Ignored transient Puppeteer error:', reason.message);
-        return;
-    }
-    // Don't swallow real rejections
-    console.error('[WA] Unhandled Rejection:', reason);
+  if (
+    reason &&
+    reason.message &&
+    (reason.message.includes('Execution context was destroyed') ||
+      reason.message.includes('Protocol error') ||
+      reason.message.includes('Target closed') ||
+      reason.message.includes('Session closed'))
+  ) {
+    console.warn('[WA] Handled transient Puppeteer warning:', reason.message);
+    return;
+  }
+  console.error('[WA] Unhandled Rejection:', reason);
 });
 
-// ─── Persistent auth path ─────────────────────────────────────────────────────
-// In packaged Electron: WA_AUTH_PATH is set to app.getPath('userData')/wwebjs_auth
-// In dev: falls back to a folder in the OS temp dir so it survives restarts
+// ── Persistent Auth and Cache Paths ───────────────────────────────────────────
 const getAuthPath = () => {
-    if (process.env.WA_AUTH_PATH) return process.env.WA_AUTH_PATH;
-    // Dev fallback: store next to the project so dev sessions persist too
-    return path.resolve(__dirname, '..', 'wwebjs_auth_dev');
+  if (process.env.WA_AUTH_PATH) return process.env.WA_AUTH_PATH;
+  return path.resolve(__dirname, '..', 'wwebjs_auth_dev');
 };
 
 const getCachePath = () => {
-    if (process.env.WA_CACHE_PATH) return process.env.WA_CACHE_PATH;
-    return path.resolve(__dirname, '..', 'wwebjs_cache_dev');
+  if (process.env.WA_CACHE_PATH) return process.env.WA_CACHE_PATH;
+  return path.resolve(__dirname, '..', 'wwebjs_cache_dev');
 };
 
-// ─── State ────────────────────────────────────────────────────────────────────
+// ── State Management ──────────────────────────────────────────────────────────
 let client = null;
 let qrCodeData = null;
-let connectionStatus = 'DISCONNECTED';
-let connectedInfo = null;   // { name, number } when READY
+let connectionStatus = 'DISCONNECTED'; // DISCONNECTED | INITIALIZING | QR_READY | AUTHENTICATED | READY | RECONNECTING | FAILED
+let connectedInfo = null; // { name, number }
+let lastError = null;
 let reconnectTimer = null;
 let reconnectAttempts = 0;
-let waStarted = false;       // Only true after user manually initiates connection
-const MAX_RECONNECT_ATTEMPTS = 3;  // Reduced to avoid long loops
-const RECONNECT_BASE_DELAY_MS = 8000; // 8s, 16s, 32s
+let isInitializing = false;
+let waExplicitlyStarted = false;
 
-// ─── Helpers ──────────────────────────────────────────────────────────────────
+const MAX_RECONNECT_ATTEMPTS = 4;
+const RECONNECT_BASE_DELAY_MS = 6000; // 6s, 12s, 24s, 48s
+
+// ── Browser Path Discovery (Chrome -> Edge -> Brave) ─────────────────────────
 const getExecutablePath = () => {
-    const candidates = [
-        'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
-        'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
-        path.join(os.homedir(), 'AppData\\Local\\Google\\Chrome\\Application\\chrome.exe'),
-        '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
-        '/usr/bin/google-chrome',
-        '/usr/bin/chromium-browser',
-    ];
-    for (const p of candidates) {
-        try {
-            if (fs.existsSync(p)) return p;
-        } catch {}
-    }
-    return null;
-};
+  const localAppData = process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local');
+  const programFiles = process.env['ProgramFiles'] || 'C:\\Program Files';
+  const programFilesX86 = process.env['ProgramFiles(x86)'] || 'C:\\Program Files (x86)';
 
-const clearAuthFolders = () => {
-    const authPath = getAuthPath();
-    const cachePath = getCachePath();
-    [authPath, cachePath].forEach(p => {
-        try {
-            if (fs.existsSync(p)) {
-                fs.rmSync(p, { recursive: true, force: true });
-                console.log('[WA] Cleared folder:', p);
-            }
-        } catch (e) {
-            console.error('[WA] Failed to clear folder:', p, e.message);
-        }
-    });
-};
+  const candidates = [
+    // Google Chrome
+    path.join(programFiles, 'Google', 'Chrome', 'Application', 'chrome.exe'),
+    path.join(programFilesX86, 'Google', 'Chrome', 'Application', 'chrome.exe'),
+    path.join(localAppData, 'Google', 'Chrome', 'Application', 'chrome.exe'),
 
-// Check for Chrome SingletonLock and remove it so restart works
-const clearSingletonLock = () => {
-    const authPath = getAuthPath();
-    const lockFile = path.join(authPath, 'session-athassmedi', 'SingletonLock');
+    // Microsoft Edge (Pre-installed on 100% of Windows 10/11 machines)
+    path.join(programFilesX86, 'Microsoft', 'Edge', 'Application', 'msedge.exe'),
+    path.join(programFiles, 'Microsoft', 'Edge', 'Application', 'msedge.exe'),
+    path.join(localAppData, 'Microsoft', 'Edge', 'Application', 'msedge.exe'),
+
+    // Brave Browser
+    path.join(programFiles, 'BraveSoftware', 'Brave-Browser', 'Application', 'brave.exe'),
+    path.join(programFilesX86, 'BraveSoftware', 'Brave-Browser', 'Application', 'brave.exe'),
+    path.join(localAppData, 'BraveSoftware', 'Brave-Browser', 'Application', 'brave.exe'),
+
+    // macOS & Linux paths
+    '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+    '/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge',
+    '/usr/bin/google-chrome',
+    '/usr/bin/google-chrome-stable',
+    '/usr/bin/chromium-browser',
+    '/usr/bin/chromium',
+  ];
+
+  for (const p of candidates) {
     try {
-        if (fs.existsSync(lockFile)) {
-            fs.unlinkSync(lockFile);
-            console.log('[WA] Removed stale SingletonLock');
-        }
-    } catch (e) { /* ignore */ }
+      if (fs.existsSync(p)) {
+        console.log('[WA] Found browser executable at:', p);
+        return p;
+      }
+    } catch {}
+  }
+  console.log('[WA] No custom browser found. Relying on default Puppeteer browser.');
+  return null;
 };
 
-const scheduleReconnect = () => {
-    if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
-        console.log('[WA] Max reconnect attempts reached. Waiting for manual reconnect.');
-        connectionStatus = 'DISCONNECTED';
-        return;
-    }
-    const delay = RECONNECT_BASE_DELAY_MS * Math.pow(2, reconnectAttempts);
-    reconnectAttempts++;
-    console.log(`[WA] Scheduling reconnect attempt ${reconnectAttempts} in ${delay / 1000}s...`);
-    connectionStatus = 'RECONNECTING';
-
-    if (reconnectTimer) clearTimeout(reconnectTimer);
-    reconnectTimer = setTimeout(() => {
-        reconnectTimer = null;
-        startClient(false); // don't clear auth on auto-reconnect
-    }, delay);
+// ── Cleanup Locks and Stale Files ─────────────────────────────────────────────
+const removeDirectoryRecursive = (dirPath) => {
+  if (!fs.existsSync(dirPath)) return;
+  try {
+    fs.rmSync(dirPath, { recursive: true, force: true, maxRetries: 3, retryDelay: 200 });
+    console.log('[WA] Successfully removed directory:', dirPath);
+  } catch (err) {
+    console.warn('[WA] Directory removal warning (may be locked):', err.message);
+  }
 };
 
-const destroyClient = async () => {
-    if (!client) return;
+const clearSingletonLocks = () => {
+  const authPath = getAuthPath();
+  const sessionDir = path.join(authPath, 'session-athassmedi');
+  const lockFiles = [
+    path.join(sessionDir, 'SingletonLock'),
+    path.join(sessionDir, 'SingletonCookie'),
+    path.join(sessionDir, 'SingletonSocket'),
+    path.join(sessionDir, 'Default', 'SingletonLock'),
+    path.join(sessionDir, 'Default', 'SingletonCookie'),
+  ];
+
+  for (const file of lockFiles) {
+    try {
+      if (fs.existsSync(file)) {
+        fs.unlinkSync(file);
+        console.log('[WA] Removed lock file:', file);
+      }
+    } catch {}
+  }
+};
+
+const forceCleanSession = async () => {
+  console.log('[WA] Force cleaning all WhatsApp session data...');
+  if (reconnectTimer) {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+  }
+
+  // 1. Destroy client if running
+  if (client) {
     const c = client;
     client = null;
-    try { await c.destroy(); } catch {}
+    try {
+      await c.destroy();
+    } catch (e) {
+      console.warn('[WA] Client destroy warning:', e.message);
+    }
+  }
+
+  // 2. Wait 500ms for browser processes to release file handles
+  await new Promise((resolve) => setTimeout(resolve, 500));
+
+  // 3. Clear auth and cache directories
+  removeDirectoryRecursive(getAuthPath());
+  removeDirectoryRecursive(getCachePath());
+
+  // 4. Reset state flags
+  qrCodeData = null;
+  connectedInfo = null;
+  lastError = null;
+  reconnectAttempts = 0;
+  connectionStatus = 'DISCONNECTED';
+  isInitializing = false;
+  console.log('[WA] Session cleanup complete.');
 };
 
-// ─── Core: Start Client ───────────────────────────────────────────────────────
-const startClient = (freshStart = false) => {
+// ── Auto Reconnect Scheduler ──────────────────────────────────────────────────
+const scheduleReconnect = () => {
+  if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
+    console.log('[WA] Max reconnect attempts reached. Setting status to DISCONNECTED.');
+    connectionStatus = 'DISCONNECTED';
+    lastError = 'Connection dropped. Please click Reconnect or Scan QR code.';
+    return;
+  }
+
+  const delay = RECONNECT_BASE_DELAY_MS * Math.pow(1.8, reconnectAttempts);
+  reconnectAttempts++;
+  console.log(`[WA] Scheduling reconnect attempt ${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS} in ${Math.round(delay / 1000)}s...`);
+  connectionStatus = 'RECONNECTING';
+
+  if (reconnectTimer) clearTimeout(reconnectTimer);
+  reconnectTimer = setTimeout(() => {
+    reconnectTimer = null;
+    startClient(false);
+  }, delay);
+};
+
+// ── Safely Destroy Client ─────────────────────────────────────────────────────
+const destroyClient = async () => {
+  if (!client) return;
+  const c = client;
+  client = null;
+  try {
+    await c.destroy();
+  } catch (err) {
+    console.warn('[WA] Destroy client warning:', err.message);
+  }
+};
+
+// ── Start Client (Core Engine) ────────────────────────────────────────────────
+const startClient = async (freshStart = false) => {
+  if (isInitializing) {
+    console.log('[WA] Client initialization already in progress. Skipping duplicate start.');
+    return;
+  }
+
+  isInitializing = true;
+  waExplicitlyStarted = true;
+
+  if (reconnectTimer) {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+  }
+
+  try {
     if (freshStart) {
-        reconnectAttempts = 0;
-        clearAuthFolders();
+      await forceCleanSession();
     } else {
-        // Remove stale browser lock so we can restart cleanly
-        clearSingletonLock();
+      await destroyClient();
+      clearSingletonLocks();
     }
 
-    console.log('[WA] Initializing client... (auth:', getAuthPath(), ')');
-    waStarted = true;
+    console.log('[WA] Initializing WhatsApp Client (Auth Path:', getAuthPath(), ')...');
     connectionStatus = 'INITIALIZING';
     qrCodeData = null;
     connectedInfo = null;
+    lastError = null;
 
     const executablePath = getExecutablePath();
-    const userAgent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
+    const userAgent =
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
 
-    client = new Client({
-        authStrategy: new LocalAuth({
-            dataPath: getAuthPath(),
-            clientId: 'athassmedi'
-        }),
-        puppeteer: {
-            headless: true,
-            executablePath: executablePath || undefined,
-            // NOTE: Do NOT set userDataDir here — LocalAuth manages its own data path.
-            // Setting both causes: "LocalAuth is not compatible with a user-supplied userDataDir"
-            args: [
-                '--no-sandbox',
-                '--disable-setuid-sandbox',
-                '--disable-dev-shm-usage',
-                '--disable-accelerated-2d-canvas',
-                '--no-first-run',
-                '--no-zygote',
-                '--disable-gpu',
-                '--disable-extensions',
-                '--disable-background-networking',
-                '--disable-default-apps',
-                '--disable-sync',
-                '--disable-translate',
-                '--metrics-recording-only',
-                '--mute-audio',
-                '--safebrowsing-disable-auto-update',
-                `--user-agent=${userAgent}`,
-            ]
-        }
+    const puppeteerArgs = [
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--disable-dev-shm-usage',
+      '--disable-accelerated-2d-canvas',
+      '--no-first-run',
+      '--no-zygote',
+      '--disable-gpu',
+      '--disable-extensions',
+      '--disable-background-networking',
+      '--disable-default-apps',
+      '--disable-sync',
+      '--disable-translate',
+      '--metrics-recording-only',
+      '--mute-audio',
+      '--safebrowsing-disable-auto-update',
+      '--disable-web-security',
+      `--user-agent=${userAgent}`,
+    ];
+
+    const newClient = new Client({
+      authStrategy: new LocalAuth({
+        dataPath: getAuthPath(),
+        clientId: 'athassmedi',
+      }),
+      puppeteer: {
+        headless: true,
+        executablePath: executablePath || undefined,
+        args: puppeteerArgs,
+      },
     });
 
-    client.on('qr', async (qr) => {
-        console.log('[WA] QR Code received.');
-        connectionStatus = 'QR_READY';
-        reconnectAttempts = 0; // Reset — user saw QR so we're in manual flow now
-        try {
-            qrCodeData = await qrcode.toDataURL(qr, { margin: 2, width: 256 });
-        } catch (err) {
-            console.error('[WA] QR conversion error:', err);
-        }
-    });
+    client = newClient;
 
-    client.on('authenticated', () => {
-        console.log('[WA] Authenticated successfully.');
-        connectionStatus = 'AUTHENTICATED';
-        qrCodeData = null;
-
-        // Workaround: Sometimes the 'ready' event doesn't fire due to WhatsApp Web UI updates
-        // If it's still not READY after 15 seconds, force it.
-        setTimeout(() => {
-            if (connectionStatus === 'AUTHENTICATED') {
-                console.log('[WA] Force-setting READY state (timeout fallback)');
-                connectionStatus = 'READY';
-                try {
-                    const info = client.info;
-                    if (info) {
-                        const phone = info.wid ? info.wid.user : '';
-                        const name = info.pushname || '';
-                        connectedInfo = { name, number: phone };
-                        console.log(`[WA] Connected as: ${name} (+${phone})`);
-                    }
-                } catch (e) {
-                    console.warn('[WA] Could not fetch account info in fallback:', e.message);
-                }
-            }
-        }, 15000);
-    });
-
-    client.on('ready', async () => {
-        console.log('[WA] Client ready!');
-        connectionStatus = 'READY';
-        qrCodeData = null;
-        reconnectAttempts = 0;
-
-        // Fetch connected account info
-        try {
-            const info = client.info;
-            if (info) {
-                const phone = info.wid ? info.wid.user : '';
-                const name = info.pushname || '';
-                connectedInfo = { name, number: phone };
-                console.log(`[WA] Connected as: ${name} (+${phone})`);
-            }
-        } catch (e) {
-            console.warn('[WA] Could not fetch account info:', e.message);
-        }
-    });
-
-    client.on('auth_failure', (msg) => {
-        console.error('[WA] Auth failure:', msg);
-        connectionStatus = 'DISCONNECTED';
-        connectedInfo = null;
-        // Auth failure usually means corrupted session — clear and let user scan fresh
-        clearAuthFolders();
-    });
-
-    client.on('disconnected', async (reason) => {
-        console.log('[WA] Disconnected. Reason:', reason);
-        connectedInfo = null;
-        await destroyClient();
-
-        // LOGOUT means intentional disconnect — don't auto-reconnect
-        if (reason === 'LOGOUT') {
-            connectionStatus = 'DISCONNECTED';
-            return;
-        }
-
-        // Otherwise schedule an auto-reconnect
-        scheduleReconnect();
-    });
-
-    client.initialize().catch(err => {
-        console.error('[WA] Initialization error:', err.message);
-        connectionStatus = 'DISCONNECTED';
-        scheduleReconnect();
-    });
-};
-
-// ─── Normalize phone number to E.164 digits (no +) ───────────────────────────
-const normalizePhone = (raw) => {
-    const digits = String(raw || '').replace(/\D/g, '');
-    if (!digits) return '';
-    if (digits.length === 10) return `91${digits}`;
-    if (digits.length === 11 && digits.startsWith('0')) return `91${digits.slice(1)}`;
-    return digits;
-};
-
-// ─── Express Routes ───────────────────────────────────────────────────────────
-const initWhatsApp = (app) => {
-    // Do NOT auto-start WhatsApp on server boot.
-    // WhatsApp is optional and requires a QR scan. Starting it automatically
-    // causes browser conflicts when the server restarts frequently in dev.
-    // The user initiates connection from Settings > WhatsApp tab.
-
-    // GET /api/whatsapp/status
-    app.get('/api/whatsapp/status', (req, res) => {
-        res.json({
-            status: connectionStatus,
-            qr: qrCodeData,
-            info: connectedInfo,
-            reconnectAttempt: reconnectAttempts,
-            maxAttempts: MAX_RECONNECT_ATTEMPTS,
+    // ── Event Handlers ──
+    newClient.on('qr', async (qr) => {
+      console.log('[WA] QR Code received from WhatsApp Web.');
+      connectionStatus = 'QR_READY';
+      reconnectAttempts = 0;
+      lastError = null;
+      try {
+        qrCodeData = await qrcode.toDataURL(qr, {
+          margin: 2,
+          width: 280,
+          color: { dark: '#0f172a', light: '#ffffff' },
         });
+      } catch (err) {
+        console.error('[WA] QR generation error:', err);
+      }
     });
 
-    // POST /api/whatsapp/restart  — manual reconnect without wiping session
-    app.post('/api/whatsapp/restart', async (req, res) => {
-        console.log('[WA] Manual restart requested.');
-        if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
-        await destroyClient();
-        reconnectAttempts = 0;
-        startClient(false);  // This sets waStarted = true
-        res.json({ success: true, status: connectionStatus });
-    });
+    newClient.on('authenticated', () => {
+      console.log('[WA] Authenticated successfully!');
+      connectionStatus = 'AUTHENTICATED';
+      qrCodeData = null;
+      lastError = null;
 
-    // POST /api/whatsapp/connect — first-time connection (initiates QR flow)
-    app.post('/api/whatsapp/connect', async (req, res) => {
-        if (waStarted && connectionStatus !== 'DISCONNECTED') {
-            return res.json({ success: true, status: connectionStatus });
+      // Fallback: If ready event does not fire within 15 seconds, mark READY and fetch info
+      setTimeout(() => {
+        if (connectionStatus === 'AUTHENTICATED' && client === newClient) {
+          console.log('[WA] Setting READY state via authenticated fallback timeout.');
+          connectionStatus = 'READY';
+          try {
+            const info = newClient.info;
+            if (info) {
+              const phone = info.wid ? info.wid.user : '';
+              const name = info.pushname || 'Athass Pharmacy';
+              connectedInfo = { name, number: phone };
+              console.log(`[WA] Connected as: ${name} (+${phone})`);
+            }
+          } catch {}
         }
-        console.log('[WA] User initiated connection.');
-        if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
-        await destroyClient();
-        reconnectAttempts = 0;
-        startClient(false);
-        res.json({ success: true, status: connectionStatus });
+      }, 15000);
     });
 
-    // POST /api/whatsapp/logout  — full logout + fresh QR
-    app.post('/api/whatsapp/logout', async (req, res) => {
-        console.log('[WA] Logout requested.');
-        if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
-        reconnectAttempts = 0;
+    newClient.on('ready', async () => {
+      console.log('[WA] WhatsApp Client is fully READY!');
+      connectionStatus = 'READY';
+      qrCodeData = null;
+      reconnectAttempts = 0;
+      lastError = null;
 
-        const c = client;
-        client = null;
+      try {
+        const info = newClient.info;
+        if (info) {
+          const phone = info.wid ? info.wid.user : '';
+          const name = info.pushname || 'Athass Pharmacy';
+          connectedInfo = { name, number: phone };
+          console.log(`[WA] Connected account: ${name} (+${phone})`);
+        }
+      } catch (err) {
+        console.warn('[WA] Could not fetch account info:', err.message);
+      }
+    });
+
+    newClient.on('auth_failure', async (msg) => {
+      console.error('[WA] Auth failure:', msg);
+      connectionStatus = 'FAILED';
+      lastError = `Authentication failed (${msg}). Please delete session and scan fresh QR.`;
+      connectedInfo = null;
+      await forceCleanSession();
+    });
+
+    newClient.on('disconnected', async (reason) => {
+      console.log('[WA] Disconnected. Reason:', reason);
+      connectedInfo = null;
+      qrCodeData = null;
+      await destroyClient();
+
+      if (reason === 'LOGOUT') {
+        console.log('[WA] User logged out from WhatsApp phone.');
         connectionStatus = 'DISCONNECTED';
-        qrCodeData = null;
-        connectedInfo = null;
+        lastError = 'Logged out from phone. Please connect and scan QR code again.';
+        await forceCleanSession();
+        return;
+      }
 
-        try { if (c) await c.logout(); } catch {}
-        try { if (c) await c.destroy(); } catch {}
-
-        // Clear stored session then boot fresh so a new QR is issued
-        setTimeout(() => {
-            clearAuthFolders();
-            startClient(false);
-        }, 2000);
-
-        res.json({ success: true });
+      lastError = `Disconnected: ${reason}`;
+      scheduleReconnect();
     });
 
-    // POST /api/whatsapp/send-pdf
-    app.post('/api/whatsapp/send-pdf', async (req, res) => {
-        const { phone, pdfBase64, filename, message } = req.body;
+    await newClient.initialize();
+  } catch (err) {
+    console.error('[WA] Failed to start client:', err.message);
+    connectionStatus = 'FAILED';
+    lastError = `Failed to start browser: ${err.message}. Check if Chrome or Edge is installed.`;
+    scheduleReconnect();
+  } finally {
+    isInitializing = false;
+  }
+};
 
-        if (connectionStatus !== 'READY') {
-            return res.status(400).json({ error: 'WhatsApp not connected. Please connect first.' });
-        }
+// ── Phone Normalization (E.164 without '+') ──────────────────────────────────
+const normalizePhone = (raw) => {
+  const digits = String(raw || '').replace(/\D/g, '');
+  if (!digits) return '';
+  if (digits.length === 10) return `91${digits}`; // Standard Indian 10-digit mobile
+  if (digits.length === 11 && digits.startsWith('0')) return `91${digits.slice(1)}`;
+  return digits;
+};
 
-        const e164 = normalizePhone(phone);
-        if (!e164) {
-            return res.status(400).json({ error: 'Invalid phone number.' });
-        }
-
-        const base64Content = String(pdfBase64 || '').split(',').pop();
-        if (!base64Content) {
-            return res.status(400).json({ error: 'Missing PDF data.' });
-        }
-
-        try {
-            // Verify session is truly alive
-            const state = await client.getState();
-            if (state !== 'CONNECTED') {
-                connectionStatus = 'DISCONNECTED';
-                scheduleReconnect();
-                return res.status(400).json({
-                    error: 'WhatsApp session lost. Reconnecting automatically — please try again in a moment.',
-                });
-            }
-
-            const numberId = await client.getNumberId(e164);
-            if (!numberId) {
-                return res.status(400).json({
-                    error: `Phone number ${phone} is not on WhatsApp.`,
-                });
-            }
-
-            const media = new MessageMedia('application/pdf', base64Content, filename || 'Invoice.pdf');
-            await client.sendMessage(numberId._serialized, media, { caption: message || '' });
-
-            res.json({ success: true, to: numberId._serialized });
-        } catch (err) {
-            console.error('[WA] Send error:', err.message);
-            const msg = err.message || String(err);
-            const isDetached = msg.includes('detached') || msg.includes('Execution context') || msg.includes('Target closed');
-            if (isDetached) {
-                connectionStatus = 'DISCONNECTED';
-                scheduleReconnect();
-            }
-            res.status(500).json({
-                error: isDetached
-                    ? 'WhatsApp session became unstable. Auto-reconnecting — retry in a moment.'
-                    : msg,
-            });
-        }
+// ── Express Router Registration ───────────────────────────────────────────────
+const initWhatsApp = (app) => {
+  // GET /api/whatsapp/status
+  app.get('/api/whatsapp/status', (req, res) => {
+    res.json({
+      status: connectionStatus,
+      qr: qrCodeData,
+      info: connectedInfo,
+      error: lastError,
+      reconnectAttempt: reconnectAttempts,
+      maxAttempts: MAX_RECONNECT_ATTEMPTS,
+      isInitializing,
     });
+  });
+
+  // POST /api/whatsapp/connect — Connect / Resume session
+  app.post('/api/whatsapp/connect', async (req, res) => {
+    console.log('[WA] User requested Connect.');
+    startClient(false);
+    res.json({ success: true, status: connectionStatus });
+  });
+
+  // POST /api/whatsapp/restart — Restart client keeping session
+  app.post('/api/whatsapp/restart', async (req, res) => {
+    console.log('[WA] User requested Restart.');
+    startClient(false);
+    res.json({ success: true, status: connectionStatus });
+  });
+
+  // POST /api/whatsapp/logout — Graceful logout from phone
+  app.post('/api/whatsapp/logout', async (req, res) => {
+    console.log('[WA] User requested Logout.');
+    if (client) {
+      try {
+        await client.logout();
+      } catch {}
+    }
+    await forceCleanSession();
+    res.json({ success: true, status: 'DISCONNECTED' });
+  });
+
+  // DELETE /api/whatsapp/session & POST /api/whatsapp/reset — Delete session & Reconnect Fresh
+  const handleResetSession = async (req, res) => {
+    console.log('[WA] User requested DELETE SESSION & RECONNECT FRESH.');
+    await forceCleanSession();
+    // Start fresh immediately to generate new QR
+    startClient(true);
+    res.json({ success: true, message: 'Session deleted. Starting fresh QR scan...' });
+  };
+
+  app.delete('/api/whatsapp/session', handleResetSession);
+  app.post('/api/whatsapp/reset', handleResetSession);
+
+  // POST /api/whatsapp/test-message — Send test ping message
+  app.post('/api/whatsapp/test-message', async (req, res) => {
+    const { phone } = req.body;
+    if (connectionStatus !== 'READY' || !client) {
+      return res.status(400).json({ error: 'WhatsApp is not connected. Please connect first.' });
+    }
+
+    const e164 = normalizePhone(phone);
+    if (!e164) {
+      return res.status(400).json({ error: 'Please provide a valid phone number.' });
+    }
+
+    try {
+      const numberId = await client.getNumberId(e164);
+      if (!numberId) {
+        return res.status(400).json({ error: `Phone number ${phone} is not registered on WhatsApp.` });
+      }
+
+      const text = `👋 Hello! This is a test message from AthassMediSync Pharmacy Management System. Your WhatsApp integration is working perfectly!`;
+      await client.sendMessage(numberId._serialized, text);
+      res.json({ success: true, message: `Test message sent to +${e164}` });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // POST /api/whatsapp/send-pdf — Send PDF Invoice
+  app.post('/api/whatsapp/send-pdf', async (req, res) => {
+    const { phone, pdfBase64, filename, message } = req.body;
+
+    if (connectionStatus !== 'READY' || !client) {
+      return res.status(400).json({
+        error: 'WhatsApp is not connected. Please connect in Settings > WhatsApp.',
+      });
+    }
+
+    const e164 = normalizePhone(phone);
+    if (!e164) {
+      return res.status(400).json({ error: 'Invalid customer phone number.' });
+    }
+
+    const base64Content = String(pdfBase64 || '').split(',').pop();
+    if (!base64Content) {
+      return res.status(400).json({ error: 'Missing PDF invoice data.' });
+    }
+
+    try {
+      // Validate client state
+      const state = await client.getState();
+      if (state !== 'CONNECTED') {
+        connectionStatus = 'DISCONNECTED';
+        scheduleReconnect();
+        return res.status(400).json({
+          error: 'WhatsApp session disconnected. Reconnecting in background — please try again in a few moments.',
+        });
+      }
+
+      const numberId = await client.getNumberId(e164);
+      if (!numberId) {
+        return res.status(400).json({
+          error: `Customer phone number (${phone}) is not registered on WhatsApp.`,
+        });
+      }
+
+      const media = new MessageMedia('application/pdf', base64Content, filename || 'Invoice.pdf');
+      await client.sendMessage(numberId._serialized, media, {
+        caption: message || 'Here is your invoice. Thank you for your business!',
+      });
+
+      res.json({ success: true, to: numberId._serialized });
+    } catch (err) {
+      console.error('[WA] Send PDF error:', err.message);
+      const msg = err.message || String(err);
+      const isDetached =
+        msg.includes('detached') ||
+        msg.includes('Execution context') ||
+        msg.includes('Target closed') ||
+        msg.includes('Session closed');
+
+      if (isDetached) {
+        connectionStatus = 'DISCONNECTED';
+        scheduleReconnect();
+      }
+
+      res.status(500).json({
+        error: isDetached
+          ? 'WhatsApp browser session encountered a glitch. Auto-reconnecting — please retry in a moment.'
+          : msg,
+      });
+    }
+  });
 };
 
 module.exports = { initWhatsApp };

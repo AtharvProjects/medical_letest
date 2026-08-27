@@ -249,6 +249,16 @@ export async function sendInvoiceViaWhatsApp(invoice, settings) {
   });
 }
 
+export function openWhatsAppWebInvoice(invoice, settings) {
+  if (!invoice.customer_phone) return;
+  const digits = String(invoice.customer_phone).replace(/\D/g, '');
+  const phone = digits.length === 10 ? `91${digits}` : digits;
+  const text = encodeURIComponent(
+    `Hello! Here is your invoice details from ${settings.shop_name || 'AthassMediSync'}:\nInvoice No: ${invoice.invoice_number}\nAmount: ₹${invoice.total_amount}\nThank you for choosing us!`
+  );
+  window.open(`https://wa.me/${phone}?text=${text}`, '_blank');
+}
+
 export function downloadPDF(doc, filename) {
   const base64 = doc.output('datauristring').split(',')[1];
   

@@ -130,6 +130,9 @@ export const api = {
     logoutWhatsApp: () => request('/whatsapp/logout', { method: 'POST' }),
     restartWhatsApp: () => request('/whatsapp/restart', { method: 'POST' }),
     connectWhatsApp: () => request('/whatsapp/connect', { method: 'POST' }),
+    deleteWhatsAppSession: () => request('/whatsapp/session', { method: 'DELETE' }),
+    resetWhatsAppSession: () => request('/whatsapp/reset', { method: 'POST' }),
+    sendWhatsAppTestMessage: (phone) => request('/whatsapp/test-message', { method: 'POST', body: JSON.stringify({ phone }) }),
 
     // Generic
 
