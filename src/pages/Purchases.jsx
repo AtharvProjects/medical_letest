@@ -269,8 +269,6 @@ function useItemValidation(item) {
 function PurchaseCreate({ editing, onDone, onCancel }) {
   const showToast = useToast();
   const [suppliers, setSuppliers] = useState([]);
-  const [medicines, setMedicines] = useState([]);
-  const [batches, setBatches] = useState([]);
   const [saving, setSaving] = useState(false);
 
   const [formData, setFormData] = useState({
@@ -308,60 +306,81 @@ function PurchaseCreate({ editing, onDone, onCancel }) {
   const [currentItem, setCurrentItem] = useState(EMPTY_ITEM);
   const [searchMed, setSearchMed] = useState('');
   const [medResults, setMedResults] = useState([]);
+  const [searchingMed, setSearchingMed] = useState(false);
   const blurTimer = useRef(null);
+  const searchTimer = useRef(null);
 
   const v = useItemValidation(currentItem);
 
   useEffect(() => {
-    Promise.all([api.get('/suppliers'), api.get('/medicines'), api.get('/batches')])
-      .then(([s, m, b]) => { setSuppliers(s); setMedicines(m); setBatches(b); })
-      .catch(() => showToast('Failed to load form data', 'error'));
+    api.get('/suppliers')
+      .then(setSuppliers)
+      .catch(() => showToast('Failed to load suppliers', 'error'));
   }, [showToast]);
 
   const setItem = (patch) => setCurrentItem((p) => ({ ...p, ...patch }));
 
   const handleSearchMed = (query) => {
     setSearchMed(query);
-    if (!query) { setMedResults([]); return; }
-    const lower = query.toLowerCase();
-    const matching = medicines.filter(
-      (m) => m.brand_name.toLowerCase().includes(lower) || (m.generic_name && m.generic_name.toLowerCase().includes(lower))
-    );
-    const options = [];
-    matching.forEach((m) => {
-      batches.filter((b) => b.medicine_id === m.id).forEach((b) => {
-        options.push({
-          type: 'batch', unique_id: `batch_${b.id}`, medicine_id: m.id, brand_name: m.brand_name,
-          company_name: m.company_name, batch_number: b.batch_number, quantity: b.quantity,
-          gst_percent: m.gst_percent, expiry_date: b.expiry_date, mrp: b.mrp, selling_rate: b.selling_rate,
-          purchase_rate: b.purchase_rate, unit_category: m.unit_category, tablets_per_strip: m.tablets_per_strip,
-        });
-      });
-      options.push({
-        type: 'medicine', unique_id: `med_${m.id}`, medicine_id: m.id, brand_name: m.brand_name,
-        company_name: m.company_name, gst_percent: m.gst_percent, unit_category: m.unit_category,
-        tablets_per_strip: m.tablets_per_strip,
-      });
-    });
-    setMedResults(options.slice(0, 15));
+    if (searchTimer.current) clearTimeout(searchTimer.current);
+
+    const trimmed = query.trim();
+    if (!trimmed) {
+      setMedResults([]);
+      setSearchingMed(false);
+      return;
+    }
+
+    setSearchingMed(true);
+    // Instant responsive debounce using high-performance SQLite indexed search
+    searchTimer.current = setTimeout(async () => {
+      try {
+        const res = await api.getMedicines({ search: trimmed, limit: 12, active_only: 'true' });
+        const list = res?.data || (Array.isArray(res) ? res : []);
+        setMedResults(list);
+      } catch (err) {
+        console.error('Medicine search error:', err);
+      } finally {
+        setSearchingMed(false);
+      }
+    }, 60);
   };
 
-  const selectMedicine = (opt) => {
+  const selectMedicine = async (med) => {
     const base = {
-      medicine_id: opt.medicine_id, medicine_name: opt.brand_name, gst_percent: opt.gst_percent,
-      unit_category: opt.unit_category || 'Tablet', tablets_per_strip: opt.tablets_per_strip || 10, pack_count: '',
+      medicine_id: med.id,
+      medicine_name: med.brand_name,
+      gst_percent: med.gst_percent ?? 12,
+      unit_category: med.unit_category || 'Tablet',
+      tablets_per_strip: med.tablets_per_strip || 10,
+      pack_count: '',
     };
-    if (opt.type === 'batch') {
-      setCurrentItem({
-        ...EMPTY_ITEM, ...base,
-        batch_number: opt.batch_number || '', expiry_date: (opt.expiry_date || '').slice(0, 10),
-        mrp: opt.mrp || '', selling_rate: opt.selling_rate || '', purchase_rate: opt.purchase_rate || '',
-      });
-    } else {
+
+    setSearchMed(med.brand_name);
+    setMedResults([]);
+
+    try {
+      // Pre-fill latest known batch rates if available
+      const fullMed = await api.getMedicine(med.id);
+      const latestBatch = fullMed?.batches && fullMed.batches.length > 0
+        ? fullMed.batches[fullMed.batches.length - 1]
+        : null;
+
+      if (latestBatch) {
+        setCurrentItem({
+          ...EMPTY_ITEM,
+          ...base,
+          batch_number: '',
+          purchase_rate: latestBatch.purchase_rate || '',
+          selling_rate: latestBatch.selling_rate || '',
+          mrp: latestBatch.mrp || '',
+        });
+      } else {
+        setCurrentItem({ ...EMPTY_ITEM, ...base });
+      }
+    } catch {
       setCurrentItem({ ...EMPTY_ITEM, ...base });
     }
-    setSearchMed(opt.brand_name);
-    setMedResults([]);
   };
 
   const addItem = () => {
@@ -499,12 +518,12 @@ function PurchaseCreate({ editing, onDone, onCancel }) {
               {medResults.length > 0 && (
                 <div className="autocomplete-dropdown">
                   {medResults.map((m) => (
-                    <div key={m.unique_id} className="autocomplete-item" onMouseDown={() => selectMedicine(m)}>
+                    <div key={m.id} className="autocomplete-item" onMouseDown={() => selectMedicine(m)}>
                       <div style={{ fontWeight: 500 }}>
-                        {m.brand_name} <span className="text-muted" style={{ fontWeight: 400 }}>· {m.company_name}</span>
+                        {m.brand_name} <span className="text-muted" style={{ fontWeight: 400 }}>· {m.company_name || 'Generic'}</span>
                       </div>
-                      <div className="item-subtitle" style={{ color: m.type === 'batch' ? 'var(--primary)' : 'var(--text-muted)' }}>
-                        {m.type === 'batch' ? `Batch: ${m.batch_number} · Stock: ${m.quantity}` : '+ New Batch'}
+                      <div className="item-subtitle" style={{ color: 'var(--text-muted)' }}>
+                        {m.generic_name ? `${m.generic_name} · ` : ''}Current Stock: {m.total_stock || 0} {m.unit_category || 'units'}
                       </div>
                     </div>
                   ))}

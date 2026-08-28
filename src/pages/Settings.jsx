@@ -89,49 +89,48 @@ export default function Settings() {
       </div>
 
       <div className="two-col">
-        {/* Shop Information */}
-        <div className="glass-card">
-          <SectionHead icon={Building2} title="Shop Information" />
-
-          <FormField label="Shop Name">
-            <Input name="shop_name" value={settings.shop_name} onChange={handleChange} />
-          </FormField>
-
-          <FormField label="Address">
-            <Textarea name="shop_address" rows={3} value={settings.shop_address} onChange={handleChange} />
-          </FormField>
-
-          <div className="form-row">
-            <FormField label="Phone Number">
-              <Input name="shop_phone" value={settings.shop_phone} onChange={handleChange} />
-            </FormField>
-            <FormField label="Email Address">
-              <Input type="email" name="shop_email" value={settings.shop_email} onChange={handleChange} />
-            </FormField>
-          </div>
-
-          <div className="form-row">
-            <FormField label="GST Number">
-              <Input name="shop_gst" value={settings.shop_gst} onChange={handleChange} />
-            </FormField>
-            <FormField label="Drug License No.">
-              <Input name="shop_dl" value={settings.shop_dl} onChange={handleChange} />
-            </FormField>
-          </div>
-
-          <FormField
-            label="Pharmacy State (Place of Supply)"
-            hint="Used to decide the GST split on bills: same state as the customer → CGST + SGST, different state → IGST."
-          >
-            <Select name="shop_state" value={settings.shop_state || ''} onChange={handleChange}>
-              <option value="">— Select state —</option>
-              {INDIAN_STATES.map((st) => <option key={st} value={st}>{st}</option>)}
-            </Select>
-          </FormField>
-        </div>
-
-        {/* Right column: alerts, network, whatsapp, backup */}
+        {/* Left column: Shop Information, Alerts, Network */}
         <div className="flex flex-col" style={{ gap: 16 }}>
+          <div className="glass-card">
+            <SectionHead icon={Building2} title="Shop Information" />
+
+            <FormField label="Shop Name">
+              <Input name="shop_name" value={settings.shop_name} onChange={handleChange} />
+            </FormField>
+
+            <FormField label="Address">
+              <Textarea name="shop_address" rows={3} value={settings.shop_address} onChange={handleChange} />
+            </FormField>
+
+            <div className="form-row">
+              <FormField label="Phone Number">
+                <Input name="shop_phone" value={settings.shop_phone} onChange={handleChange} />
+              </FormField>
+              <FormField label="Email Address">
+                <Input type="email" name="shop_email" value={settings.shop_email} onChange={handleChange} />
+              </FormField>
+            </div>
+
+            <div className="form-row">
+              <FormField label="GST Number">
+                <Input name="shop_gst" value={settings.shop_gst} onChange={handleChange} />
+              </FormField>
+              <FormField label="Drug License No.">
+                <Input name="shop_dl" value={settings.shop_dl} onChange={handleChange} />
+              </FormField>
+            </div>
+
+            <FormField
+              label="Pharmacy State (Place of Supply)"
+              hint="Used to decide the GST split on bills: same state as the customer → CGST + SGST, different state → IGST."
+            >
+              <Select name="shop_state" value={settings.shop_state || ''} onChange={handleChange}>
+                <option value="">— Select state —</option>
+                {INDIAN_STATES.map((st) => <option key={st} value={st}>{st}</option>)}
+              </Select>
+            </FormField>
+          </div>
+
           <div className="glass-card">
             <SectionHead icon={Bell} title="Alerts & Notifications" />
 
@@ -178,7 +177,10 @@ export default function Settings() {
               />
             </FormField>
           </div>
+        </div>
 
+        {/* Right column: WhatsApp Integration and Backup & Restore */}
+        <div className="flex flex-col" style={{ gap: 16 }}>
           <WhatsAppSetup />
           <BackupRestore />
         </div>

@@ -3,6 +3,33 @@ import autoTable from 'jspdf-autotable';
 import { numberToWords } from '../utils/billing';
 import { api, BASE_URL } from './api';
 
+/**
+ * Build a unique, descriptive filename for an invoice PDF.
+ * Format: CustomerName_INV-XXXX_28-Aug-2026_1350.pdf
+ */
+export function buildInvoiceFilename(invoice) {
+  // Sanitize customer name: remove non-alphanumeric (keep spaces), then replace spaces with underscores
+  const rawName = invoice.customer_name || 'Counter_Customer';
+  const safeName = rawName
+    .replace(/[^a-zA-Z0-9\s]/g, '')
+    .trim()
+    .replace(/\s+/g, '_')
+    || 'Customer';
+
+  const invNum = invoice.invoice_number || 'INV';
+
+  // Parse the invoice date/time
+  const dt = new Date(invoice.created_at || Date.now());
+  const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  const dd = String(dt.getDate()).padStart(2, '0');
+  const mmm = months[dt.getMonth()];
+  const yyyy = dt.getFullYear();
+  const hh = String(dt.getHours()).padStart(2, '0');
+  const mi = String(dt.getMinutes()).padStart(2, '0');
+
+  return `${safeName}_${invNum}_${dd}-${mmm}-${yyyy}_${hh}${mi}.pdf`;
+}
+
 export function generateInvoicePDF(invoice, settings, action = 'save') {
   const doc = new jsPDF({ unit: 'mm', format: 'a4' });
   const pageWidth = doc.internal.pageSize.getWidth();
@@ -225,7 +252,7 @@ export function generateInvoicePDF(invoice, settings, action = 'save') {
     doc.autoPrint();
     window.open(doc.output('bloburl'), '_blank');
   } else if (action === 'download') {
-    downloadPDF(doc, `Invoice_${invoice.invoice_number}.pdf`);
+    downloadPDF(doc, buildInvoiceFilename(invoice));
   }
 
   return doc;
@@ -244,20 +271,12 @@ export async function sendInvoiceViaWhatsApp(invoice, settings) {
   return await api.sendWhatsAppPdf({
     phone: invoice.customer_phone,
     pdfBase64,
-    filename: `Invoice_${invoice.invoice_number}.pdf`,
+    filename: buildInvoiceFilename(invoice),
     message
   });
 }
 
-export function openWhatsAppWebInvoice(invoice, settings) {
-  if (!invoice.customer_phone) return;
-  const digits = String(invoice.customer_phone).replace(/\D/g, '');
-  const phone = digits.length === 10 ? `91${digits}` : digits;
-  const text = encodeURIComponent(
-    `Hello! Here is your invoice details from ${settings.shop_name || 'AthassMediSync'}:\nInvoice No: ${invoice.invoice_number}\nAmount: ₹${invoice.total_amount}\nThank you for choosing us!`
-  );
-  window.open(`https://wa.me/${phone}?text=${text}`, '_blank');
-}
+
 
 export function downloadPDF(doc, filename) {
   const base64 = doc.output('datauristring').split(',')[1];

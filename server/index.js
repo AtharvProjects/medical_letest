@@ -2255,13 +2255,60 @@ app.get('/api/suppliers/:id/payments', (req, res) => {
 
 // Pay off credit
 app.post('/api/customers/:id/pay-credit', (req, res) => {
-  const { amount } = req.body;
-  if (!amount || amount <= 0) return res.status(400).json({ error: 'Invalid amount' });
-  const customer = db.prepare('SELECT credit_balance FROM customers WHERE id = ?').get(req.params.id);
+  const { amount, payment_mode } = req.body;
+  const numAmount = parseFloat(amount);
+  if (isNaN(numAmount) || numAmount <= 0) return res.status(400).json({ error: 'Invalid payment amount' });
+  const customer = db.prepare('SELECT * FROM customers WHERE id = ?').get(req.params.id);
   if (!customer) return res.status(404).json({ error: 'Customer not found' });
-  if (amount > customer.credit_balance) return res.status(400).json({ error: 'Amount exceeds outstanding balance' });
-  db.prepare('UPDATE customers SET credit_balance = credit_balance - ? WHERE id = ?').run(amount, req.params.id);
-  res.json({ success: true, new_balance: customer.credit_balance - amount });
+  if (numAmount > (Number(customer.credit_balance) || 0) + 0.01) {
+    return res.status(400).json({ error: 'Amount exceeds outstanding balance' });
+  }
+
+  const mode = payment_mode || 'Cash';
+  const newBalance = Math.max(0, (Number(customer.credit_balance) || 0) - numAmount);
+
+  const tx = db.transaction(() => {
+    // 1. Update customer balance and last_payment_mode
+    db.prepare(`
+      UPDATE customers 
+      SET credit_balance = ?, last_payment_mode = ?, updated_at = datetime('now', 'localtime') 
+      WHERE id = ?
+    `).run(newBalance, mode, req.params.id);
+
+    // 2. Allocate payment to pending invoices in FIFO order (oldest first)
+    const pendingInvoices = db.prepare(`
+      SELECT id, total_amount, amount_paid, credit_amount, payment_mode
+      FROM invoices 
+      WHERE customer_id = ? AND (credit_amount > 0.01 OR LOWER(TRIM(payment_mode)) IN ('pending', 'udhaari'))
+      ORDER BY datetime(created_at) ASC, id ASC
+    `).all(req.params.id);
+
+    let remaining = numAmount;
+    for (const inv of pendingInvoices) {
+      if (remaining <= 0.001) break;
+
+      const total = Number(inv.total_amount) || 0;
+      const currentPaid = Number(inv.amount_paid) || 0;
+      const currentCredit = inv.credit_amount != null ? Number(inv.credit_amount) : Math.max(0, total - currentPaid);
+      const payToThis = Math.min(remaining, currentCredit);
+
+      const updatedPaid = currentPaid + payToThis;
+      const updatedCredit = Math.max(0, currentCredit - payToThis);
+      const isCleared = updatedCredit <= 0.01 || updatedPaid >= (total - 0.01);
+      const newMode = isCleared ? mode : inv.payment_mode;
+
+      db.prepare(`
+        UPDATE invoices 
+        SET amount_paid = ?, credit_amount = ?, payment_mode = ? 
+        WHERE id = ?
+      `).run(updatedPaid, updatedCredit, newMode, inv.id);
+
+      remaining -= payToThis;
+    }
+  });
+
+  tx();
+  res.json({ success: true, new_balance: newBalance, mode });
 });
 
 // NOTE: A shadowed duplicate /api/reports/daily-chart was removed here.

@@ -45,9 +45,10 @@ export default function Customers() {
   // Pay credit
   const [payCust, setPayCust] = useState(null);
   const [payAmount, setPayAmount] = useState('');
+  const [payMode, setPayMode] = useState('Cash');
   const [paying, setPaying] = useState(false);
 
-  // Purchase history
+  // Billing history
   const [historyCust, setHistoryCust] = useState(null);
   const [historyDetails, setHistoryDetails] = useState(null);
   const [sendingWhatsApp, setSendingWhatsApp] = useState(null);
@@ -74,8 +75,8 @@ export default function Customers() {
   const counts = useMemo(() => ({
     all: customers.length,
     credit: customers.filter((c) => Number(c.credit_balance) > 0).length,
-    cash: customers.filter((c) => (c.last_payment_mode || 'Cash') === 'Cash').length,
-    upi: customers.filter((c) => c.last_payment_mode === 'UPI').length,
+    cash: customers.filter((c) => (c.last_payment_mode || 'Cash') === 'Cash' && Number(c.credit_balance) <= 0).length,
+    upi: customers.filter((c) => c.last_payment_mode === 'UPI' && Number(c.credit_balance) <= 0).length,
   }), [customers]);
 
   const stats = useMemo(() => {
@@ -153,17 +154,22 @@ export default function Customers() {
   };
 
   /* ------------------------------ pay credit ------------------------------ */
-  const openPay = (c) => { setPayCust(c); setPayAmount(''); };
+  const openPay = (c) => {
+    setPayCust(c);
+    setPayAmount((Number(c?.credit_balance) || 0).toFixed(2));
+    setPayMode('Cash');
+  };
+
   const handlePayCredit = async (e) => {
     e.preventDefault();
     const amt = parseFloat(payAmount);
     const balance = Number(payCust?.credit_balance) || 0;
     if (isNaN(amt) || amt <= 0) return showToast('Enter a valid amount', 'error');
-    if (amt > balance + 0.001) return showToast('Amount exceeds outstanding balance', 'error');
+    if (amt > balance + 0.01) return showToast('Amount exceeds outstanding balance', 'error');
     setPaying(true);
     try {
-      await api.post(`/customers/${payCust.id}/pay-credit`, { amount: amt });
-      showToast(`Payment of ${money(amt)} recorded`);
+      await api.post(`/customers/${payCust.id}/pay-credit`, { amount: amt, payment_mode: payMode });
+      showToast(`Payment of ${money(amt)} recorded (${payMode})`);
       setPayCust(null);
       setPayAmount('');
       fetchCustomers();
@@ -174,7 +180,7 @@ export default function Customers() {
     }
   };
 
-  /* ---------------------------- purchase history --------------------------- */
+  /* ---------------------------- billing history --------------------------- */
   const openHistory = async (c) => {
     setHistoryCust(c);
     setHistoryDetails(null);
@@ -182,7 +188,7 @@ export default function Customers() {
       const data = await api.get(`/customers/${c.id}`);
       setHistoryDetails(data);
     } catch (err) {
-      showToast('Failed to load purchase history', 'error');
+      showToast('Failed to load billing history', 'error');
     }
   };
 
@@ -269,12 +275,16 @@ export default function Customers() {
     { header: 'State', render: (c) => c.state || <span className="text-muted">—</span> },
     {
       header: 'Last Mode',
-      render: (c) => <Badge tone={c.last_payment_mode === 'UPI' ? 'purple' : 'blue'}>{c.last_payment_mode || 'Cash'}</Badge>,
+      render: (c) => {
+        const hasDues = Number(c.credit_balance) > 0.01;
+        const mode = hasDues ? 'Pending' : (c.last_payment_mode || 'Cash');
+        return <Badge tone={hasDues ? 'red' : (mode === 'UPI' ? 'purple' : 'blue')}>{mode}</Badge>;
+      },
     },
     {
       header: 'Credit Balance',
       align: 'right',
-      render: (c) => (Number(c.credit_balance) > 0 ? <Badge tone="red">{money(c.credit_balance)}</Badge> : <span className="text-muted">—</span>),
+      render: (c) => (Number(c.credit_balance) > 0.01 ? <Badge tone="red">{money(c.credit_balance)}</Badge> : <span className="text-muted">—</span>),
     },
     {
       header: '',
@@ -282,10 +292,10 @@ export default function Customers() {
       width: 190,
       render: (c) => (
         <div className="flex gap-2" style={{ justifyContent: 'flex-end' }}>
-          {Number(c.credit_balance) > 0 && (
+          {Number(c.credit_balance) > 0.01 && (
             <Button variant="success" size="sm" icon={IndianRupee} onClick={() => openPay(c)} title="Record credit payment">Pay</Button>
           )}
-          <Button variant="ghost" size="sm" icon={History} onClick={() => openHistory(c)} title="Purchase history" />
+          <Button variant="ghost" size="sm" icon={History} onClick={() => openHistory(c)} title="Billing history" />
           <Button variant="ghost" size="sm" icon={Edit2} onClick={() => openEdit(c)} title="Edit customer" />
           <Button variant="ghost" size="sm" icon={Trash2} onClick={() => setConfirmTarget(c)} title="Delete customer" />
         </div>
@@ -296,7 +306,14 @@ export default function Customers() {
   const historyColumns = [
     { header: 'Date', render: (inv) => formatDate(inv.created_at) },
     { header: 'Invoice #', render: (inv) => <span style={{ fontWeight: 600 }}>{inv.invoice_number}</span> },
-    { header: 'Mode', render: (inv) => <Badge tone={inv.payment_mode === 'Pending' ? 'red' : 'green'}>{inv.payment_mode}</Badge> },
+    {
+      header: 'Mode',
+      render: (inv) => {
+        const isPending = (Number(inv.credit_amount) > 0.01) || (inv.payment_mode && inv.payment_mode.toLowerCase() === 'pending');
+        const modeText = isPending ? 'Pending' : (inv.payment_mode === 'Pending' ? 'Paid' : (inv.payment_mode || 'Paid'));
+        return <Badge tone={isPending ? 'red' : 'green'}>{modeText}</Badge>;
+      },
+    },
     { header: 'Amount', align: 'right', render: (inv) => <span style={{ fontWeight: 600 }}>{money(inv.total_amount)}</span> },
     {
       header: 'Reprint',
@@ -348,10 +365,16 @@ export default function Customers() {
         </div>
       </div>
 
-      <div className="stats-grid" style={{ gridTemplateColumns: 'repeat(3, 1fr)' }}>
+      <div className="stats-grid">
         <StatCard label="Total Customers" value={stats.total} accent="blue" icon={Users} />
-        <StatCard label="Pending Credit" value={stats.pending} accent="amber" icon={AlertCircle} sub={stats.pending ? 'customers with dues' : 'all clear'} />
-        <StatCard label="Total Outstanding" value={money(stats.outstanding)} accent="red" icon={Wallet} />
+        <StatCard
+          label="Pending Credit"
+          value={stats.pending}
+          sub={stats.pending === 0 ? 'all clear' : `${stats.pending} customers with dues`}
+          accent={stats.pending > 0 ? 'amber' : 'green'}
+          icon={AlertCircle}
+        />
+        <StatCard label="Total Outstanding" value={money(stats.outstanding)} accent={stats.outstanding > 0 ? 'red' : 'green'} icon={Wallet} />
       </div>
 
       <div className="glass-card" style={{ padding: 0, overflow: 'hidden' }}>
@@ -363,19 +386,20 @@ export default function Customers() {
             <EmptyState
               icon={Users}
               title="No customers found"
-              message={search || activeTab !== 'all' ? 'No customers match this filter.' : 'Add a customer to track credit (udhaari) and purchase history.'}
-              action={!search && activeTab === 'all' && <Button icon={Plus} onClick={openNew}>New Customer</Button>}
+              message={search ? 'No customers match your search.' : 'Add your first customer to get started.'}
+              action={!search && <Button icon={Plus} onClick={openNew}>New Customer</Button>}
             />
           }
         />
       </div>
 
-      {/* Add / edit */}
+      {/* Add / edit modal */}
       {showModal && (
         <Modal
-          title={editing ? 'Edit Customer' : 'Add Customer'}
+          title={editing ? `Edit Customer · ${editing.name}` : 'New Customer'}
           onClose={() => setShowModal(false)}
           onSubmit={handleSubmit}
+          size={500}
           footer={
             <>
               <Button variant="secondary" onClick={() => setShowModal(false)}>Cancel</Button>
@@ -432,29 +456,39 @@ export default function Customers() {
             <div className="text-muted text-xs" style={{ textTransform: 'uppercase', letterSpacing: 0.5 }}>Outstanding Balance</div>
             <div style={{ fontSize: 26, fontWeight: 800, color: 'var(--danger)' }}>{money(payCust.credit_balance)}</div>
           </div>
-          <FormField label="Amount Received">
-            <div className="flex gap-2">
-              <Input
-                type="number"
-                step="0.01"
-                min="0"
-                autoFocus
-                value={payAmount}
-                onChange={(e) => setPayAmount(e.target.value)}
-                placeholder="0.00"
-              />
-              <Button variant="secondary" onClick={() => setPayAmount(String(Number(payCust.credit_balance) || 0))}>
-                Full
-              </Button>
-            </div>
-          </FormField>
+          <div className="form-row">
+            <FormField label="Payment Mode">
+              <Select value={payMode} onChange={(e) => setPayMode(e.target.value)}>
+                <option value="Cash">Cash</option>
+                <option value="UPI">UPI</option>
+                <option value="Card">Card</option>
+                <option value="Bank Transfer">Bank Transfer</option>
+              </Select>
+            </FormField>
+            <FormField label="Amount Received">
+              <div className="flex gap-2">
+                <Input
+                  type="number"
+                  step="0.01"
+                  min="0"
+                  autoFocus
+                  value={payAmount}
+                  onChange={(e) => setPayAmount(e.target.value)}
+                  placeholder="0.00"
+                />
+                <Button variant="secondary" onClick={() => setPayAmount((Number(payCust.credit_balance) || 0).toFixed(2))}>
+                  Full
+                </Button>
+              </div>
+            </FormField>
+          </div>
         </Modal>
       )}
 
-      {/* Purchase history */}
+      {/* Billing history */}
       {historyCust && (
         <Modal
-          title={`Purchase History · ${historyCust.name}`}
+          title={`Billing History · ${historyCust.name}`}
           onClose={() => setHistoryCust(null)}
           wide
           footer={
@@ -482,7 +516,7 @@ export default function Customers() {
               <DataTable
                 columns={historyColumns}
                 rows={historyDetails.invoices}
-                empty={<EmptyState icon={History} title="No purchases yet" message="This customer has no billing history." height={160} />}
+                empty={<EmptyState icon={History} title="No bills yet" message="This customer has no billing history." height={160} />}
               />
             </div>
           )}

@@ -183,6 +183,49 @@ const scheduleReconnect = () => {
   }, delay);
 };
 
+// ── Helper: Ensure WWebJS and Store are injected into page ───────────────────
+const ensureWWebReady = async (clientInstance, maxWaitMs = 6000) => {
+  if (!clientInstance || !clientInstance.pupPage) return false;
+  const start = Date.now();
+
+  while (Date.now() - start < maxWaitMs) {
+    try {
+      const isReady = await clientInstance.pupPage.evaluate(() => {
+        return typeof window.WWebJS !== 'undefined' && typeof window.WWebJS.sendMessage === 'function' && typeof window.WWebJS.getChat === 'function';
+      });
+      if (isReady) return true;
+
+      // Attempt injection if require / Store is ready
+      const state = await clientInstance.pupPage.evaluate(() => {
+        return {
+          hasRequire: typeof window.require !== 'undefined',
+          hasStore: typeof window.Store !== 'undefined',
+        };
+      }).catch(() => null);
+
+      if (state && state.hasRequire) {
+        try {
+          const { ExposeStore } = require('whatsapp-web.js/src/util/Injected/Store');
+          const { LoadUtils } = require('whatsapp-web.js/src/util/Injected/Utils');
+          await clientInstance.pupPage.evaluate(ExposeStore).catch(() => {});
+          await clientInstance.pupPage.evaluate(LoadUtils).catch(() => {});
+        } catch {}
+      }
+    } catch (e) {
+      // transient page navigation / context destroyed
+    }
+    await new Promise((r) => setTimeout(r, 500));
+  }
+
+  try {
+    return await clientInstance.pupPage.evaluate(() => {
+      return typeof window.WWebJS !== 'undefined' && typeof window.WWebJS.sendMessage === 'function';
+    });
+  } catch {
+    return false;
+  }
+};
+
 // ── Safely Destroy Client ─────────────────────────────────────────────────────
 const destroyClient = async () => {
   if (!client) return;
@@ -253,6 +296,11 @@ const startClient = async (freshStart = false) => {
         dataPath: getAuthPath(),
         clientId: 'athassmedi',
       }),
+      webVersionCache: {
+        type: 'remote',
+        remotePath: 'https://raw.githubusercontent.com/wppconnect-team/wa-version/main/html/{version}.html',
+        strict: false,
+      },
       puppeteer: {
         headless: true,
         executablePath: executablePath || undefined,
@@ -279,32 +327,23 @@ const startClient = async (freshStart = false) => {
       }
     });
 
+    newClient.on('loading_screen', (percent, message) => {
+      console.log(`[WA] Syncing chats: ${percent}% (${message})`);
+      if (connectionStatus !== 'READY') {
+        connectionStatus = 'AUTHENTICATED';
+      }
+    });
+
     newClient.on('authenticated', () => {
-      console.log('[WA] Authenticated successfully!');
+      console.log('[WA] Authenticated successfully! Syncing WhatsApp Web...');
       connectionStatus = 'AUTHENTICATED';
       qrCodeData = null;
       lastError = null;
-
-      // Fallback: If ready event does not fire within 15 seconds, mark READY and fetch info
-      setTimeout(() => {
-        if (connectionStatus === 'AUTHENTICATED' && client === newClient) {
-          console.log('[WA] Setting READY state via authenticated fallback timeout.');
-          connectionStatus = 'READY';
-          try {
-            const info = newClient.info;
-            if (info) {
-              const phone = info.wid ? info.wid.user : '';
-              const name = info.pushname || 'Athass Pharmacy';
-              connectedInfo = { name, number: phone };
-              console.log(`[WA] Connected as: ${name} (+${phone})`);
-            }
-          } catch {}
-        }
-      }, 15000);
     });
 
     newClient.on('ready', async () => {
       console.log('[WA] WhatsApp Client is fully READY!');
+      await ensureWWebReady(newClient, 5000);
       connectionStatus = 'READY';
       qrCodeData = null;
       reconnectAttempts = 0;
@@ -313,8 +352,8 @@ const startClient = async (freshStart = false) => {
       try {
         const info = newClient.info;
         if (info) {
-          const phone = info.wid ? info.wid.user : '';
-          const name = info.pushname || 'Athass Pharmacy';
+          const phone = info.wid ? (info.wid.user || '') : '';
+          const name = info.pushname || (phone ? `+${phone}` : 'Connected Account');
           connectedInfo = { name, number: phone };
           console.log(`[WA] Connected account: ${name} (+${phone})`);
         }
@@ -382,17 +421,23 @@ const initWhatsApp = (app) => {
   }, 1500);
 
   // Helper to wait briefly if WhatsApp is in the middle of authenticating
-  const waitForReady = async (timeoutMs = 7000) => {
-    if (connectionStatus === 'READY' && client) return true;
+  const waitForReady = async (timeoutMs = 12000) => {
+    if (connectionStatus === 'READY' && client) {
+      const ok = await ensureWWebReady(client, 2000);
+      if (ok) return true;
+    }
     if (connectionStatus === 'DISCONNECTED') {
       startClient(false);
     }
     const start = Date.now();
     while (Date.now() - start < timeoutMs) {
-      if (connectionStatus === 'READY' && client) return true;
-      await new Promise((r) => setTimeout(r, 600));
+      if (connectionStatus === 'READY' && client) {
+        const ok = await ensureWWebReady(client, 2000);
+        if (ok) return true;
+      }
+      await new Promise((r) => setTimeout(r, 800));
     }
-    return connectionStatus === 'READY' && client;
+    return connectionStatus === 'READY' && client && (await ensureWWebReady(client, 2000));
   };
 
   // GET /api/whatsapp/status
@@ -450,10 +495,14 @@ const initWhatsApp = (app) => {
   app.post('/api/whatsapp/test-message', async (req, res) => {
     const { phone } = req.body;
     if (connectionStatus !== 'READY') {
-      await waitForReady(5000);
+      await waitForReady(8000);
     }
     if (connectionStatus !== 'READY' || !client) {
-      return res.status(400).json({ error: 'WhatsApp is not connected. Please scan QR code in Settings > WhatsApp.' });
+      return res.status(400).json({
+        error: connectionStatus === 'AUTHENTICATED' || connectionStatus === 'INITIALIZING'
+          ? 'WhatsApp is still synchronizing. Please wait a few seconds and try again.'
+          : 'WhatsApp is not connected. Please scan QR code in Settings > WhatsApp.'
+      });
     }
 
     const e164 = normalizePhone(phone);
@@ -462,6 +511,7 @@ const initWhatsApp = (app) => {
     }
 
     try {
+      await ensureWWebReady(client, 4000);
       let targetChatId = `${e164}@c.us`;
       try {
         const numberId = await client.getNumberId(e164);
@@ -486,12 +536,14 @@ const initWhatsApp = (app) => {
     const { phone, pdfBase64, filename, message } = req.body;
 
     if (connectionStatus !== 'READY') {
-      await waitForReady(6000);
+      await waitForReady(10000);
     }
 
     if (connectionStatus !== 'READY' || !client) {
       return res.status(400).json({
-        error: 'WhatsApp is not connected. Please connect in Settings > WhatsApp.',
+        error: connectionStatus === 'AUTHENTICATED' || connectionStatus === 'INITIALIZING'
+          ? 'WhatsApp is synchronizing with your phone. Please wait a few seconds and try again.'
+          : 'WhatsApp is not connected. Please connect in Settings > WhatsApp.',
       });
     }
 
@@ -506,6 +558,8 @@ const initWhatsApp = (app) => {
     }
 
     try {
+      await ensureWWebReady(client, 5000);
+
       let targetChatId = `${e164}@c.us`;
       try {
         const numberId = await client.getNumberId(e164);
@@ -518,11 +572,32 @@ const initWhatsApp = (app) => {
 
       console.log(`[WA] Sending PDF invoice (${filename || 'Invoice.pdf'}) to ${targetChatId}...`);
       const media = new MessageMedia('application/pdf', base64Content, filename || 'Invoice.pdf');
-      
-      await client.sendMessage(targetChatId, media, {
-        caption: message || 'Here is your invoice. Thank you for your business!',
-        sendMediaAsDocument: true,
-      });
+
+      let sentSuccess = false;
+      let lastSendErr = null;
+
+      for (let attempt = 1; attempt <= 2; attempt++) {
+        try {
+          await ensureWWebReady(client, 3000);
+          await client.sendMessage(targetChatId, media, {
+            caption: message || 'Here is your invoice. Thank you for your business!',
+            sendMediaAsDocument: true,
+          });
+          sentSuccess = true;
+          break;
+        } catch (sendErr) {
+          lastSendErr = sendErr;
+          console.warn(`[WA] Send PDF attempt ${attempt} failed:`, sendErr.message);
+          if (attempt === 1) {
+            await ensureWWebReady(client, 4000);
+            await new Promise((r) => setTimeout(r, 1000));
+          }
+        }
+      }
+
+      if (!sentSuccess) {
+        throw lastSendErr || new Error('Could not send PDF after retrying');
+      }
 
       console.log(`[WA] PDF invoice successfully dispatched to ${targetChatId}`);
       res.json({ success: true, to: targetChatId });

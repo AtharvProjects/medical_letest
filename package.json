@@ -11,7 +11,9 @@
     "electron:dev": "concurrently \"npm run server\" \"npm run client\" \"wait-on http://localhost:5173 && electron .\"",
     "electron:build": "node scripts/build-exe.js",
     "postinstall": "electron-builder install-app-deps",
-    "seed": "node_modules/electron/dist/electron.exe scripts/run-seed.js --no-sandbox"
+    "seed": "electron scripts/run-seed.js --no-sandbox",
+    "db:clear": "electron scripts/clear-all-data.js --no-sandbox",
+    "test": "electron scripts/test-production-readiness.js --no-sandbox"
   },
   "build": {
     "appId": "com.athass.medisync",

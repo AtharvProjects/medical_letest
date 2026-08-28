@@ -5,7 +5,7 @@ import {
   Search, Trash2, Printer, FileText, Send, X, UserPlus, Stethoscope,
   CheckCircle2, ShoppingCart,
 } from 'lucide-react';
-import { generateInvoicePDF, sendInvoiceViaWhatsApp, openWhatsAppWebInvoice } from '../services/pdf';
+import { generateInvoicePDF, sendInvoiceViaWhatsApp } from '../services/pdf';
 import { calculateLineTotal, splitInclusive, round2 } from '../utils/billing';
 import { money, todayStr } from '../utils/format';
 import Fuse from 'fuse.js';
@@ -38,7 +38,6 @@ const effectiveUnitPrice = (item) => {
 };
 
 export default function Billing() {
-  const [medicines, setMedicines] = useState([]);
   const [customers, setCustomers] = useState([]);
   const [doctors, setDoctors] = useState([]);
   const [settings, setSettings] = useState({});
@@ -121,7 +120,6 @@ export default function Billing() {
   };
 
   useEffect(() => {
-    api.getMedicines().then(setMedicines).catch(() => showToast('Failed to load medicines', 'error'));
     api.getCustomers().then(setCustomers).catch(() => {});
     api.getDoctors().then(setDoctors).catch(() => {});
     api.getSettings().then(setSettings).catch((err) => console.error('Failed to load settings', err));
@@ -148,28 +146,7 @@ export default function Billing() {
       return;
     }
 
-    // Fast-path for small in-memory list
-    if (medicines.length > 0 && medicines.length <= 2000) {
-      const q = query.toLowerCase();
-      const matches = [];
-      for (let i = 0; i < medicines.length; i++) {
-        const m = medicines[i];
-        if (
-          (m.alias && m.alias.toLowerCase().includes(q)) ||
-          (m.brand_name && m.brand_name.toLowerCase().includes(q)) ||
-          (m.generic_name && m.generic_name.toLowerCase().includes(q)) ||
-          (m.company_name && m.company_name.toLowerCase().includes(q))
-        ) {
-          matches.push(m);
-          if (matches.length >= 10) break;
-        }
-      }
-      setSuggestions(matches);
-      setShowSuggestions(matches.length > 0);
-      return;
-    }
-
-    // High-performance indexed SQLite search for large databases (1 Lakh+ medicines)
+    // High-performance indexed SQLite search for instant responsiveness
     const timer = setTimeout(() => {
       api.getMedicines({ search: query, limit: 10, active_only: 'true' })
         .then((res) => {
@@ -178,10 +155,10 @@ export default function Billing() {
           setShowSuggestions(list.length > 0);
         })
         .catch(() => {});
-    }, 100);
+    }, 60);
 
     return () => clearTimeout(timer);
-  }, [medSearch, medicines]);
+  }, [medSearch]);
 
   const filteredCustomers = useMemo(() => {
     if (!custSearch.trim()) return customers;
@@ -451,11 +428,7 @@ export default function Billing() {
     } catch (err) {
       console.error(err);
       const msg = err.message || 'Could not send WhatsApp message.';
-      showToast(msg, 'error');
-      // If direct WhatsApp failed, offer 1-click fallback to WhatsApp Web
-      if (window.confirm(`${msg}\n\nWould you like to open WhatsApp Web to send this invoice to +${phone}?`)) {
-        openWhatsAppWebInvoice(lastInvoice, settings);
-      }
+      showToast(`${msg} — Please ensure WhatsApp is connected in Settings.`, 'error');
     } finally {
       setSendingWhatsApp(false);
     }
