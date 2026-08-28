@@ -33,6 +33,7 @@ export default function Settings() {
     low_stock_threshold: '10',
     expiry_alert_days: '90',
     whatsapp_enabled: 'true',
+    whatsapp_auto_send: 'true',
     whatsapp_instance_id: '',
     whatsapp_access_token: '',
   });
@@ -146,6 +147,20 @@ export default function Settings() {
               hint="Warn this many days before a batch expires."
             >
               <Input type="number" min="0" name="expiry_alert_days" value={settings.expiry_alert_days} onChange={handleChange} />
+            </FormField>
+
+            <FormField
+              label="Automatic WhatsApp PDF Dispatch"
+              hint="When enabled, every bill saved with a customer phone number automatically delivers the invoice PDF via WhatsApp."
+            >
+              <Select
+                name="whatsapp_auto_send"
+                value={settings.whatsapp_auto_send !== 'false' ? 'true' : 'false'}
+                onChange={handleChange}
+              >
+                <option value="true">Enabled (Auto-send PDF on bill save)</option>
+                <option value="false">Disabled (Manual send only via button)</option>
+              </Select>
             </FormField>
           </div>
 

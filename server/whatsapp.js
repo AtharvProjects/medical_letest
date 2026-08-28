@@ -371,6 +371,30 @@ const normalizePhone = (raw) => {
 
 // ── Express Router Registration ───────────────────────────────────────────────
 const initWhatsApp = (app) => {
+  // Auto-start WhatsApp engine in background on server boot
+  setTimeout(() => {
+    try {
+      console.log('[WA] Background auto-initialization started on server boot...');
+      startClient(false);
+    } catch (err) {
+      console.warn('[WA] Background auto-start notice:', err.message);
+    }
+  }, 1500);
+
+  // Helper to wait briefly if WhatsApp is in the middle of authenticating
+  const waitForReady = async (timeoutMs = 7000) => {
+    if (connectionStatus === 'READY' && client) return true;
+    if (connectionStatus === 'DISCONNECTED') {
+      startClient(false);
+    }
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+      if (connectionStatus === 'READY' && client) return true;
+      await new Promise((r) => setTimeout(r, 600));
+    }
+    return connectionStatus === 'READY' && client;
+  };
+
   // GET /api/whatsapp/status
   app.get('/api/whatsapp/status', (req, res) => {
     res.json({
@@ -425,8 +449,11 @@ const initWhatsApp = (app) => {
   // POST /api/whatsapp/test-message — Send test ping message
   app.post('/api/whatsapp/test-message', async (req, res) => {
     const { phone } = req.body;
+    if (connectionStatus !== 'READY') {
+      await waitForReady(5000);
+    }
     if (connectionStatus !== 'READY' || !client) {
-      return res.status(400).json({ error: 'WhatsApp is not connected. Please connect in Settings > WhatsApp.' });
+      return res.status(400).json({ error: 'WhatsApp is not connected. Please scan QR code in Settings > WhatsApp.' });
     }
 
     const e164 = normalizePhone(phone);
@@ -457,6 +484,10 @@ const initWhatsApp = (app) => {
   // POST /api/whatsapp/send-pdf — Send PDF Invoice
   app.post('/api/whatsapp/send-pdf', async (req, res) => {
     const { phone, pdfBase64, filename, message } = req.body;
+
+    if (connectionStatus !== 'READY') {
+      await waitForReady(6000);
+    }
 
     if (connectionStatus !== 'READY' || !client) {
       return res.status(400).json({

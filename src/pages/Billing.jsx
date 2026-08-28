@@ -360,6 +360,19 @@ export default function Billing() {
       showToast('Invoice saved successfully');
       window.dispatchEvent(new Event('invoice-saved')); // refresh header stats
 
+      // Automatically dispatch invoice PDF to customer WhatsApp
+      const custPhone = savedInvoice.customer_phone || selectedCustomer?.phone;
+      const isAutoSendEnabled = settings?.whatsapp_auto_send !== 'false';
+      if (custPhone && isAutoSendEnabled) {
+        sendInvoiceViaWhatsApp(savedInvoice, settings || {})
+          .then(() => {
+            showToast(`Invoice PDF automatically sent to WhatsApp (+${custPhone})!`, 'success');
+          })
+          .catch((waErr) => {
+            console.log('[Billing] Auto WhatsApp send status:', waErr.message);
+          });
+      }
+
       // 20s review countdown for the counter we just saved.
       if (timerRef.current) clearInterval(timerRef.current);
       timerRef.current = setInterval(() => {
