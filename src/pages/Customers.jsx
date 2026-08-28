@@ -15,11 +15,12 @@ import {
   FormField, Input, Select, Textarea, Spinner,
 } from '../components/ui';
 
-const EMPTY = { name: '', phone: '', address: '', state: '', credit_balance: 0, last_payment_mode: 'Cash' };
+const EMPTY = { name: '', phone: '', address: '', state: '', credit_balance: 0, last_payment_mode: 'Cash', customer_type: 'Regular' };
 
 const TABS = [
   { key: 'all', label: 'All', variant: 'primary' },
   { key: 'credit', label: 'Pending', variant: 'danger' },
+  { key: 'doctor', label: 'Doctors (Cost Price)', variant: 'purple' },
   { key: 'cash', label: 'Cash', variant: 'primary' },
   { key: 'upi', label: 'UPI', variant: 'purple' },
 ];
@@ -75,6 +76,7 @@ export default function Customers() {
   const counts = useMemo(() => ({
     all: customers.length,
     credit: customers.filter((c) => Number(c.credit_balance) > 0).length,
+    doctor: customers.filter((c) => c.customer_type === 'Doctor').length,
     cash: customers.filter((c) => (c.last_payment_mode || 'Cash') === 'Cash' && Number(c.credit_balance) <= 0).length,
     upi: customers.filter((c) => c.last_payment_mode === 'UPI' && Number(c.credit_balance) <= 0).length,
   }), [customers]);
@@ -91,6 +93,7 @@ export default function Customers() {
   const filtered = useMemo(() => {
     let list = customers;
     if (activeTab === 'credit') list = list.filter((c) => Number(c.credit_balance) > 0);
+    else if (activeTab === 'doctor') list = list.filter((c) => c.customer_type === 'Doctor');
     else if (activeTab === 'cash') list = list.filter((c) => (c.last_payment_mode || 'Cash') === 'Cash');
     else if (activeTab === 'upi') list = list.filter((c) => c.last_payment_mode === 'UPI');
 
@@ -115,6 +118,7 @@ export default function Customers() {
       state: c.state || '',
       credit_balance: Number(c.credit_balance) || 0,
       last_payment_mode: c.last_payment_mode || 'Cash',
+      customer_type: c.customer_type || 'Regular',
     });
     setShowModal(true);
   };
@@ -266,7 +270,12 @@ export default function Customers() {
       render: (c) => (
         <div className="flex items-center gap-2">
           <User size={16} className="text-muted" />
-          <span style={{ fontWeight: 500 }}>{c.name}</span>
+          <div>
+            <span style={{ fontWeight: 500 }}>{c.name}</span>
+            {c.customer_type === 'Doctor' && (
+              <Badge tone="purple" style={{ marginLeft: 6, fontSize: 10, padding: '1px 6px' }}>🩺 Doctor / Cost Price</Badge>
+            )}
+          </div>
         </div>
       ),
     },
@@ -409,6 +418,12 @@ export default function Customers() {
         >
           <FormField label="Customer Name" required>
             <Input autoFocus value={formData.name} onChange={(e) => setFormData({ ...formData, name: e.target.value })} />
+          </FormField>
+          <FormField label="Customer Type (Pricing Tier)" hint="Doctors receive purchase/cost price; Regular customers receive standard selling rate.">
+            <Select value={formData.customer_type || 'Regular'} onChange={(e) => setFormData({ ...formData, customer_type: e.target.value })}>
+              <option value="Regular">Regular Customer (Selling Rate)</option>
+              <option value="Doctor">Doctor / Clinic (Purchase / Cost Price)</option>
+            </Select>
           </FormField>
           <div className="form-row">
             <FormField label="Phone Number">

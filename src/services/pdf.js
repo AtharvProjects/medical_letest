@@ -93,7 +93,9 @@ export function generateInvoicePDF(invoice, settings, action = 'save') {
   doc.text('BILL TO:', margin, y);
   y += 4;
   doc.setFont('helvetica', 'normal');
-  doc.text(`${invoice.customer_name || 'Counter Customer'}`, margin, y);
+  const custTitle = invoice.customer_name || 'Counter Customer';
+  const tierNote = invoice.customer_type === 'Doctor' ? ' (Veterinary Doctor Pricing)' : '';
+  doc.text(`${custTitle}${tierNote}`, margin, y);
   y += 4;
   if (invoice.customer_phone) {
     doc.text(`Contact: ${invoice.customer_phone}`, margin, y);
@@ -187,8 +189,9 @@ export function generateInvoicePDF(invoice, settings, action = 'save') {
   };
 
   drawRow('Subtotal', (invoice.subtotal || 0).toFixed(2));
-  if (invoice.discount_amount > 0) {
-    drawRow('Discount', `-${(invoice.discount_amount || 0).toFixed(2)}`);
+  if (invoice.discount_amount > 0 || invoice.discount_percent > 0) {
+    const discLabel = invoice.discount_percent > 0 ? `Discount (${invoice.discount_percent}%)` : 'Discount';
+    drawRow(discLabel, `-${(invoice.discount_amount || 0).toFixed(2)}`);
   }
   
   if (invoice.gst_amount > 0) {

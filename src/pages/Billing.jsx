@@ -17,12 +17,13 @@ const PAYMENT_MODES = ['Cash', 'UPI', 'Pending'];
 const INITIAL_SESSION = {
   items: [],
   medSearch: '',
+  customerType: 'Regular', // 'Regular' | 'Doctor'
   selectedCustomer: null,
   custSearch: '',
   selectedDoctor: null,
   docSearch: '',
   paymentMode: 'Cash',
-  discount: 0,
+  discountPercent: 0,
   billSaved: false,
   lastInvoice: null,
   reviewTimer: 0,
@@ -84,8 +85,8 @@ export default function Billing() {
 
   const current = sessions[activeIdx];
   const {
-    items, medSearch, selectedCustomer, custSearch, selectedDoctor,
-    docSearch, paymentMode, discount, billSaved, lastInvoice,
+    items, medSearch, customerType, selectedCustomer, custSearch, selectedDoctor,
+    docSearch, paymentMode, discountPercent, billSaved, lastInvoice,
     reviewTimer, h1Details, isGstEnabled,
   } = current;
 
@@ -107,9 +108,17 @@ export default function Billing() {
   const setSelectedDoctor = (val) => updateActive({ selectedDoctor: val });
   const setDocSearch = (val) => updateActive({ docSearch: val });
   const setPaymentMode = (val) => updateActive({ paymentMode: val });
-  const setDiscount = (val) => updateActive({ discount: val });
+  const setDiscountPercent = (val) => updateActive({ discountPercent: val });
   const setIsGstEnabled = (val) => updateActive({ isGstEnabled: val });
-  // Was missing before — caused a ReferenceError when adding a Schedule-H1 medicine.
+  const setCustomerType = (type) => {
+    updateActive((s) => {
+      const updatedItems = s.items.map((item) => {
+        const newPrice = type === 'Doctor' ? (Number(item.purchase_rate) || 0) : (Number(item.selling_rate) || Number(item.mrp) || 0);
+        return { ...item, unit_price: newPrice };
+      });
+      return { customerType: type, items: updatedItems };
+    });
+  };
   const setH1Details = (val) => updateActive((s) => ({ h1Details: typeof val === 'function' ? val(s.h1Details) : val }));
   const setSessionReviewTimer = (idx, val) => {
     setSessions((prev) => {
@@ -183,11 +192,13 @@ export default function Billing() {
     }
     sub = round2(sub);
     gst = round2(gst);
-    const total = Math.max(0, round2(sub + gst - session.discount));
-    return { subtotal: sub, gstAmount: gst, totalAmount: total, itemCount: session.items.length };
+    const discPct = Math.min(100, Math.max(0, Number(session.discountPercent) || 0));
+    const discAmount = round2((sub + gst) * (discPct / 100));
+    const total = Math.max(0, round2(sub + gst - discAmount));
+    return { subtotal: sub, gstAmount: gst, discountPercent: discPct, discountAmount: discAmount, totalAmount: total, itemCount: session.items.length };
   };
 
-  const { subtotal, gstAmount, totalAmount } = getSessionTotals(current);
+  const { subtotal, gstAmount, discountPercent: currentDiscPct, discountAmount: currentDiscAmt, totalAmount } = getSessionTotals(current);
 
   const addMedicine = async (med) => {
     try {
@@ -208,6 +219,8 @@ export default function Billing() {
       // FEFO: batches arrive ordered by expiry; first non-expired one is nearest.
       const batch = batches[0];
       const tps = fullMed.tablets_per_strip || med.tablets_per_strip || 10;
+      const isDoctor = current.customerType === 'Doctor';
+      const initialPrice = isDoctor ? (Number(batch.purchase_rate) || 0) : (Number(batch.selling_rate) || Number(batch.mrp) || 0);
 
       setItems((prev) => {
         const existingIdx = prev.findIndex((i) => i.id === med.id && i.batch_id === batch.id);
@@ -229,10 +242,10 @@ export default function Billing() {
           batch_number: batch.batch_number,
           expiry_date: batch.expiry_date,
           quantity: 1,
-          // Q1: bill at the SELLING price (per strip), falling back to MRP when
-          // no selling rate is set. MRP kept separately for the savings display.
-          unit_price: batch.selling_rate || batch.mrp,
-          mrp: batch.mrp,
+          purchase_rate: batch.purchase_rate || 0,
+          selling_rate: batch.selling_rate || batch.mrp || 0,
+          mrp: batch.mrp || 0,
+          unit_price: initialPrice,
           max_qty: batch.quantity,
           discount_percent: 0,
           gst_percent: med.gst_percent || 12,
@@ -310,14 +323,19 @@ export default function Billing() {
       const invoiceData = {
         customer_id: selectedCustomer?.id || null,
         doctor_id: selectedDoctor?.id || null,
+        customer_type: customerType || 'Regular',
         payment_mode: paymentMode,
         is_gst_enabled: isGstEnabled,
-        discount_amount: discount,
+        discount_percent: discountPercent || 0,
+        discount_amount: currentDiscAmt,
         items: items.map((item) => ({
           medicine_id: item.id,
           batch_id: item.batch_id,
           quantity: item.quantity,
           unit_price: effectiveUnitPrice(item), // always per-unit (per-tablet)
+          purchase_rate: item.purchase_rate,
+          selling_rate: item.selling_rate,
+          mrp: item.mrp,
           discount_percent: item.discount_percent,
           gst_percent: item.gst_percent,
           tablets_per_strip: item.tablets_per_strip || 10,
@@ -436,36 +454,69 @@ export default function Billing() {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', gap: 12 }}>
-      {/* ---------------- Counter tabs ---------------- */}
-      <div style={{ display: 'flex', gap: 8, overflowX: 'auto', flexShrink: 0, paddingBottom: 2 }}>
-        {sessions.map((session, i) => {
-          const isActive = i === activeIdx;
-          const { totalAmount: tabTotal, itemCount } = getSessionTotals(session);
-          return (
-            <button
-              key={i}
-              onClick={() => { setActiveIdx(i); setTimeout(() => searchRef.current?.focus(), 100); }}
-              style={{
-                flex: '1 0 108px', minWidth: 108, padding: '8px 12px', borderRadius: 'var(--radius-lg)',
-                border: isActive ? '1.5px solid var(--primary)' : '1px solid var(--border)',
-                background: isActive ? 'var(--primary-bg)' : 'var(--bg-secondary)',
-                cursor: 'pointer', textAlign: 'left', display: 'flex', flexDirection: 'column', gap: 3,
-                transition: 'border-color .15s, background .15s',
-              }}
-            >
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                <span style={{ fontSize: 11, fontWeight: 700, letterSpacing: 0.3, textTransform: 'uppercase', color: isActive ? 'var(--primary)' : 'var(--text-muted)' }}>
-                  Counter {i + 1}
-                  <span style={{ opacity: 0.55, fontSize: 9, marginLeft: 4, fontWeight: 500 }}>Alt+{i + 1}</span>
-                </span>
-                {itemCount > 0 && <Badge tone="blue" style={{ fontSize: 9, padding: '1px 6px' }}>{itemCount}</Badge>}
-              </div>
-              <div style={{ fontSize: 15, fontWeight: 800, color: itemCount ? 'var(--text-primary)' : 'var(--text-muted)' }}>
-                ₹{tabTotal.toFixed(0)}
-              </div>
-            </button>
-          );
-        })}
+      {/* ---------------- Top toolbar: Counter tabs + Pricing Tier ---------------- */}
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+        <div style={{ display: 'flex', gap: 8, overflowX: 'auto', flexShrink: 0, paddingBottom: 2 }}>
+          {sessions.map((session, i) => {
+            const isActive = i === activeIdx;
+            const { totalAmount: tabTotal, itemCount } = getSessionTotals(session);
+            return (
+              <button
+                key={i}
+                onClick={() => { setActiveIdx(i); setTimeout(() => searchRef.current?.focus(), 100); }}
+                style={{
+                  flex: '1 0 108px', minWidth: 108, padding: '8px 12px', borderRadius: 'var(--radius-lg)',
+                  border: isActive ? '1.5px solid var(--primary)' : '1px solid var(--border)',
+                  background: isActive ? 'var(--primary-bg)' : 'var(--bg-secondary)',
+                  cursor: 'pointer', textAlign: 'left', display: 'flex', flexDirection: 'column', gap: 3,
+                  transition: 'border-color .15s, background .15s',
+                }}
+              >
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                  <span style={{ fontSize: 11, fontWeight: 700, letterSpacing: 0.3, textTransform: 'uppercase', color: isActive ? 'var(--primary)' : 'var(--text-muted)' }}>
+                    Counter {i + 1}
+                    <span style={{ opacity: 0.55, fontSize: 9, marginLeft: 4, fontWeight: 500 }}>Alt+{i + 1}</span>
+                  </span>
+                  {itemCount > 0 && <Badge tone="blue" style={{ fontSize: 9, padding: '1px 6px' }}>{itemCount}</Badge>}
+                </div>
+                <div style={{ fontSize: 15, fontWeight: 800, color: itemCount ? 'var(--text-primary)' : 'var(--text-muted)' }}>
+                  ₹{tabTotal.toFixed(0)}
+                </div>
+              </button>
+            );
+          })}
+        </div>
+
+        {/* Pricing Tier Selector */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6, background: 'var(--bg-secondary)', padding: '4px 8px', borderRadius: 'var(--radius-lg)', border: '1px solid var(--border)' }}>
+          <span style={{ fontSize: 11, fontWeight: 700, textTransform: 'uppercase', color: 'var(--text-muted)', marginRight: 2 }}>Pricing Tier:</span>
+          <button
+            type="button"
+            onClick={() => !billSaved && setCustomerType('Regular')}
+            disabled={billSaved}
+            style={{
+              fontSize: 12, fontWeight: 600, padding: '4px 10px', borderRadius: 'var(--radius-md)', border: 'none', cursor: 'pointer',
+              background: customerType === 'Regular' ? 'var(--primary)' : 'transparent',
+              color: customerType === 'Regular' ? '#fff' : 'var(--text-muted)',
+              transition: 'all 0.15s',
+            }}
+          >
+            👤 Regular (Selling Rate)
+          </button>
+          <button
+            type="button"
+            onClick={() => !billSaved && setCustomerType('Doctor')}
+            disabled={billSaved}
+            style={{
+              fontSize: 12, fontWeight: 600, padding: '4px 10px', borderRadius: 'var(--radius-md)', border: 'none', cursor: 'pointer',
+              background: customerType === 'Doctor' ? '#8b5cf6' : 'transparent',
+              color: customerType === 'Doctor' ? '#fff' : 'var(--text-muted)',
+              transition: 'all 0.15s',
+            }}
+          >
+            🩺 Doctor (Cost Price)
+          </button>
+        </div>
       </div>
 
       {/* ---------------- Main billing grid ---------------- */}
@@ -553,7 +604,7 @@ export default function Billing() {
                       <th>Item</th>
                       <th style={{ width: 64 }}>Pack</th>
                       <th style={{ width: 92 }}>Qty</th>
-                      <th className="text-right" style={{ width: 120 }}>Rate</th>
+                      <th className="text-right" style={{ width: 130 }}>Rate ({customerType === 'Doctor' ? 'Cost ₹' : 'Selling ₹'})</th>
                       <th style={{ width: 62 }}>Disc%</th>
                       <th style={{ width: 56 }}>GST</th>
                       <th className="text-right" style={{ width: 96 }}>Total</th>
@@ -580,6 +631,7 @@ export default function Billing() {
                             <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontWeight: 600, fontSize: 12.5 }}>
                               {item.brand_name}
                               {item.is_h1 === 1 && <Badge tone="red" style={{ fontSize: 9 }}>H1</Badge>}
+                              {customerType === 'Doctor' && <Badge tone="purple" style={{ fontSize: 9 }}>Cost</Badge>}
                             </div>
                             <div className="text-muted" style={{ fontSize: 10.5 }}>
                               {item.company_name ? `${item.company_name} · ` : ''}Batch {item.batch_number}
@@ -678,8 +730,33 @@ export default function Billing() {
               {showCustDropdown && !selectedCustomer && !billSaved && (
                 <div className="autocomplete-dropdown">
                   {filteredCustomers.slice(0, 8).map((c) => (
-                    <div key={c.id} className="autocomplete-item" onMouseDown={() => { setSelectedCustomer(c); setCustSearch(''); setShowCustDropdown(false); }}>
-                      <span style={{ fontWeight: 500 }}>{c.name}</span>
+                    <div
+                      key={c.id}
+                      className="autocomplete-item"
+                      onMouseDown={() => {
+                        const newType = c.customer_type === 'Doctor' ? 'Doctor' : 'Regular';
+                        updateActive((s) => {
+                          const updatedItems = s.items.map((item) => {
+                            const newPrice = newType === 'Doctor' ? (Number(item.purchase_rate) || 0) : (Number(item.selling_rate) || Number(item.mrp) || 0);
+                            return { ...item, unit_price: newPrice };
+                          });
+                          return {
+                            selectedCustomer: c,
+                            custSearch: '',
+                            customerType: newType,
+                            items: updatedItems,
+                          };
+                        });
+                        setShowCustDropdown(false);
+                        if (newType === 'Doctor') {
+                          showToast('🩺 Doctor / Clinic selected: Switched to Purchase Cost pricing tier.', 'info');
+                        }
+                      }}
+                    >
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                        <span style={{ fontWeight: 500 }}>{c.name}</span>
+                        {c.customer_type === 'Doctor' && <Badge tone="purple" style={{ fontSize: 9 }}>🩺 Doctor</Badge>}
+                      </div>
                       {c.phone && <span className="text-muted"> · {c.phone}</span>}
                       {c.credit_balance > 0 && <Badge tone="red" style={{ marginLeft: 6 }}>{money(c.credit_balance)} due</Badge>}
                     </div>
@@ -770,15 +847,23 @@ export default function Billing() {
               <div className="flex justify-between"><span className="text-secondary">Taxable</span><span>{money(subtotal)}</span></div>
               <div className="flex justify-between"><span className="text-secondary">GST (incl.)</span><span>{money(gstAmount)}</span></div>
               <div className="flex justify-between items-center">
-                <span className="text-secondary">Discount</span>
-                <Input
-                  type="number"
-                  min={0}
-                  value={discount}
-                  disabled={billSaved}
-                  onChange={(e) => setDiscount(Number(e.target.value) || 0)}
-                  style={{ width: 90, padding: '4px 8px', textAlign: 'right' }}
-                />
+                <div style={{ display: 'flex', flexDirection: 'column' }}>
+                  <span className="text-secondary">Discount (%)</span>
+                  {currentDiscAmt > 0 && <span style={{ fontSize: 11, color: 'var(--success)' }}>-₹{currentDiscAmt.toFixed(2)}</span>}
+                </div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                  <Input
+                    type="number"
+                    min={0}
+                    max={100}
+                    step="0.5"
+                    value={discountPercent}
+                    disabled={billSaved}
+                    onChange={(e) => setDiscountPercent(Math.min(100, Math.max(0, parseFloat(e.target.value) || 0)))}
+                    style={{ width: 70, padding: '4px 8px', textAlign: 'right' }}
+                  />
+                  <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-muted)' }}>%</span>
+                </div>
               </div>
               <div style={{ borderTop: '1px solid var(--border)', paddingTop: 8, marginTop: 2 }}>
                 <div className="flex justify-between" style={{ fontSize: 18, fontWeight: 800 }}>

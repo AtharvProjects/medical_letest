@@ -1214,25 +1214,27 @@ app.get('/api/customers/:id', (req, res) => {
 });
 
 app.post('/api/customers', (req, res) => {
-  const { name, phone, address, state, credit_balance, last_payment_mode } = req.body;
+  const { name, phone, address, state, credit_balance, last_payment_mode, customer_type } = req.body;
   if (!name) return res.status(400).json({ error: 'Name is required' });
   try {
     const encPhone   = encrypt(phone || '');
     const encAddress = encrypt(address || '');
-    const result = db.prepare('INSERT INTO customers (name, phone, address, state, credit_balance, last_payment_mode) VALUES (?, ?, ?, ?, ?, ?)').run(name, encPhone, encAddress, state || '', credit_balance || 0, last_payment_mode || 'Cash');
-    res.json({ id: result.lastInsertRowid, name, phone: phone || '', address: address || '', state: state || '', credit_balance: credit_balance || 0, last_payment_mode: last_payment_mode || 'Cash' });
+    const cType = customer_type === 'Doctor' ? 'Doctor' : 'Regular';
+    const result = db.prepare('INSERT INTO customers (name, phone, address, state, credit_balance, last_payment_mode, customer_type) VALUES (?, ?, ?, ?, ?, ?, ?)').run(name, encPhone, encAddress, state || '', credit_balance || 0, last_payment_mode || 'Cash', cType);
+    res.json({ id: result.lastInsertRowid, name, phone: phone || '', address: address || '', state: state || '', credit_balance: credit_balance || 0, last_payment_mode: last_payment_mode || 'Cash', customer_type: cType });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
 app.put('/api/customers/:id', (req, res) => {
-  const { name, phone, address, state, credit_balance, last_payment_mode } = req.body;
+  const { name, phone, address, state, credit_balance, last_payment_mode, customer_type } = req.body;
   try {
     const encPhone   = encrypt(phone || '');
     const encAddress = encrypt(address || '');
-    db.prepare(`UPDATE customers SET name=?, phone=?, address=?, state=?, credit_balance=?, last_payment_mode=?, updated_at=datetime('now','localtime') WHERE id=?`).run(name, encPhone, encAddress, state || '', credit_balance || 0, last_payment_mode || 'Cash', req.params.id);
-    res.json({ success: true });
+    const cType = customer_type === 'Doctor' ? 'Doctor' : 'Regular';
+    db.prepare(`UPDATE customers SET name=?, phone=?, address=?, state=?, credit_balance=?, last_payment_mode=?, customer_type=?, updated_at=datetime('now','localtime') WHERE id=?`).run(name, encPhone, encAddress, state || '', credit_balance || 0, last_payment_mode || 'Cash', cType, req.params.id);
+    res.json({ success: true, customer_type: cType });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -1252,12 +1254,12 @@ app.delete('/api/customers/:id', (req, res) => {
 });
 
 // ── Customer CSV Export / Import / Update ──────────────────────────────────
-const CUST_CSV_COLS = ['id','name','phone','address','state','credit_balance','last_payment_mode'];
-const CUST_CSV_LABELS = { id:'ID', name:'Name', phone:'Phone', address:'Address', state:'State', credit_balance:'Credit Balance', last_payment_mode:'Last Payment Mode' };
+const CUST_CSV_COLS = ['id','name','phone','address','state','credit_balance','last_payment_mode','customer_type'];
+const CUST_CSV_LABELS = { id:'ID', name:'Name', phone:'Phone', address:'Address', state:'State', credit_balance:'Credit Balance', last_payment_mode:'Last Payment Mode', customer_type:'Customer Type (Regular/Doctor)' };
 
 const SAMPLE_CUSTOMERS = [
-  { id: '', name: 'Rahul Sharma', phone: '9876543210', address: 'Flat 402, Shanti Heights, MG Road', state: 'Maharashtra', credit_balance: 450.00, last_payment_mode: 'UPI' },
-  { id: '', name: 'Pooja Verma', phone: '9123456780', address: '12, Greenfield Colony, Sector 4', state: 'Maharashtra', credit_balance: 0.00, last_payment_mode: 'Cash' }
+  { id: '', name: 'Rahul Sharma', phone: '9876543210', address: 'Flat 402, Shanti Heights, MG Road', state: 'Maharashtra', credit_balance: 450.00, last_payment_mode: 'UPI', customer_type: 'Regular' },
+  { id: '', name: 'Dr. Pooja Verma', phone: '9123456780', address: '12, Greenfield Veterinary Hospital', state: 'Maharashtra', credit_balance: 0.00, last_payment_mode: 'Cash', customer_type: 'Doctor' }
 ];
 
 app.get('/api/customers/sample/csv', (req, res) => {
@@ -1291,8 +1293,8 @@ function executeBulkCustomersCSV(rows, isUpdateMode = false) {
     custMapById.set(c.id, c.id);
   }
 
-  const insertStmt = db.prepare('INSERT INTO customers (name, phone, address, state, credit_balance, last_payment_mode) VALUES (?, ?, ?, ?, ?, ?)');
-  const updateStmt = db.prepare(`UPDATE customers SET name=?, phone=?, address=?, state=?, credit_balance=?, last_payment_mode=?, updated_at=datetime('now','localtime') WHERE id=?`);
+  const insertStmt = db.prepare('INSERT INTO customers (name, phone, address, state, credit_balance, last_payment_mode, customer_type) VALUES (?, ?, ?, ?, ?, ?, ?)');
+  const updateStmt = db.prepare(`UPDATE customers SET name=?, phone=?, address=?, state=?, credit_balance=?, last_payment_mode=?, customer_type=?, updated_at=datetime('now','localtime') WHERE id=?`);
 
   const CHUNK_SIZE = 5000;
   for (let ch = 0; ch < rows.length; ch += CHUNK_SIZE) {
@@ -1315,12 +1317,13 @@ function executeBulkCustomersCSV(rows, isUpdateMode = false) {
           const state = c.state || '';
           const credit = parseFloat(c.credit_balance) || 0;
           const mode = c.last_payment_mode || 'Cash';
+          const cType = (c.customer_type && c.customer_type.toLowerCase().includes('doc')) ? 'Doctor' : 'Regular';
 
           if (existingId && isUpdateMode) {
-            updateStmt.run(name, phoneEnc, addrEnc, state, credit, mode, existingId);
+            updateStmt.run(name, phoneEnc, addrEnc, state, credit, mode, cType, existingId);
             result.updated++;
           } else {
-            const ins = insertStmt.run(name, phoneEnc, addrEnc, state, credit, mode);
+            const ins = insertStmt.run(name, phoneEnc, addrEnc, state, credit, mode, cType);
             const newId = Number(ins.lastInsertRowid);
             custMapByName.set(nameKey, newId);
             custMapById.set(newId, newId);
@@ -1707,7 +1710,7 @@ function getNextInvoiceNumber() {
 }
 
   app.post('/api/invoices', (req, res) => {
-    const { customer_id, doctor_id, items, payment_mode, discount_amount, notes, amount_paid, is_gst_enabled, h1_details } = req.body;
+    const { customer_id, doctor_id, customer_type, items, payment_mode, discount_percent, discount_amount, notes, amount_paid, is_gst_enabled, h1_details } = req.body;
     if (!items || !items.length) return res.status(400).json({ error: 'No items' });
   
     const txn = db.transaction(() => {
@@ -1715,6 +1718,13 @@ function getNextInvoiceNumber() {
       const todayStr = db.prepare("SELECT date('now','localtime') as d").get().d;
       let subtotal = 0;
       let gst_total = 0;
+
+      // Determine customer_type: from body, or fallback to customer record, default 'Regular'
+      let finalCustType = customer_type || 'Regular';
+      if (customer_id && !customer_type) {
+        const cust = db.prepare('SELECT customer_type FROM customers WHERE id = ?').get(customer_id);
+        if (cust?.customer_type) finalCustType = cust.customer_type;
+      }
 
       // Track cumulative quantity requested per batch so two lines drawing from
       // the SAME batch can't each pass validation and then drive stock negative.
@@ -1737,10 +1747,11 @@ function getNextInvoiceNumber() {
         }
         requestedPerBatch.set(item.batch_id, cumulative);
 
-        // unit_price from the client is the tax-INCLUSIVE per-unit SELLING price
-        // (the batch selling rate, falling back to MRP when none is set).
-        // Respect an explicit 0 (what the cashier saw); only fall back when it's absent.
-        const price = (item.unit_price !== undefined && item.unit_price !== null) ? item.unit_price : batch.selling_rate;
+        // Price calculation:
+        // For Doctors: items are provided at purchase_rate (cost price).
+        // For Regular customers: items are sold at selling_rate (or MRP if no selling rate).
+        const defaultRate = finalCustType === 'Doctor' ? batch.purchase_rate : (batch.selling_rate || batch.mrp);
+        const price = (item.unit_price !== undefined && item.unit_price !== null) ? item.unit_price : defaultRate;
         const disc = item.discount_percent || 0;
         const gross = item.quantity * price * (1 - disc / 100);
 
@@ -1758,14 +1769,18 @@ function getNextInvoiceNumber() {
 
       subtotal = round2(subtotal);
       gst_total = round2(gst_total);
-      const total_amount = Math.max(0, round2(subtotal + gst_total - (discount_amount || 0)));
+
+      const discPct = Number(discount_percent) || 0;
+      const finalDiscountAmount = (discount_amount !== undefined && discount_amount !== null && !isNaN(Number(discount_amount)))
+        ? round2(Number(discount_amount))
+        : round2((subtotal + gst_total) * (discPct / 100));
+
+      const total_amount = Math.max(0, round2(subtotal + gst_total - finalDiscountAmount));
       const isCredit = payment_mode && ['pending', 'udhaari'].includes(payment_mode.toLowerCase().trim());
       const paid = amount_paid !== undefined ? amount_paid : (isCredit ? 0 : total_amount);
       const credit = Math.max(0, total_amount - paid);
 
       // Place of supply → GST split: same state = CGST+SGST (intra), different = IGST (inter).
-      // Server is authoritative; defaults to intra-state whenever either state is unknown,
-      // so the GST total is never affected — only how it is labelled/split on the invoice.
       let is_interstate = 0;
       const shopState = (db.prepare("SELECT value FROM settings WHERE key = 'shop_state'").get()?.value || '').trim().toLowerCase();
       if (customer_id && shopState) {
@@ -1775,9 +1790,9 @@ function getNextInvoiceNumber() {
       }
 
       const invResult = db.prepare(
-        `INSERT INTO invoices (invoice_number, customer_id, doctor_id, subtotal, discount_amount, gst_amount, total_amount, payment_mode, amount_paid, credit_amount, notes, is_interstate)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-      ).run(invoice_number, customer_id || null, doctor_id || null, subtotal, discount_amount || 0, gst_total, total_amount, payment_mode || 'Cash', paid, credit, notes || '', is_interstate);
+        `INSERT INTO invoices (invoice_number, customer_id, doctor_id, customer_type, subtotal, discount_percent, discount_amount, gst_amount, total_amount, payment_mode, amount_paid, credit_amount, notes, is_interstate)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      ).run(invoice_number, customer_id || null, doctor_id || null, finalCustType, subtotal, discPct, finalDiscountAmount, gst_total, total_amount, payment_mode || 'Cash', paid, credit, notes || '', is_interstate);
   
       const invoiceId = invResult.lastInsertRowid;
   

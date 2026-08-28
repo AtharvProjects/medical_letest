@@ -77,6 +77,7 @@ db.exec(`
     state TEXT DEFAULT '',
     credit_balance REAL DEFAULT 0,
     last_payment_mode TEXT DEFAULT 'Cash',
+    customer_type TEXT DEFAULT 'Regular',
     created_at TEXT DEFAULT (datetime('now','localtime')),
     updated_at TEXT DEFAULT (datetime('now','localtime'))
   );
@@ -96,7 +97,9 @@ db.exec(`
     invoice_number TEXT NOT NULL UNIQUE,
     customer_id INTEGER,
     doctor_id INTEGER,
+    customer_type TEXT DEFAULT 'Regular',
     subtotal REAL NOT NULL DEFAULT 0,
+    discount_percent REAL DEFAULT 0,
     discount_amount REAL DEFAULT 0,
     gst_amount REAL DEFAULT 0,
     total_amount REAL NOT NULL DEFAULT 0,
@@ -224,7 +227,10 @@ function ensureColumn(table, column, ddl) {
   }
 }
 ensureColumn('customers', 'state', "state TEXT DEFAULT ''");
+ensureColumn('customers', 'customer_type', "customer_type TEXT DEFAULT 'Regular'");
 ensureColumn('invoices', 'is_interstate', 'is_interstate INTEGER DEFAULT 0');
+ensureColumn('invoices', 'customer_type', "customer_type TEXT DEFAULT 'Regular'");
+ensureColumn('invoices', 'discount_percent', 'discount_percent REAL DEFAULT 0');
 
 // Insert default settings if not exist
 const insertSetting = db.prepare('INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)');

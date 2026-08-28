@@ -275,7 +275,16 @@ function InvoiceDetailModal({ invoice, onClose, onPrint, onPDF, onWhatsApp }) {
       </p>
 
       <div className="two-col" style={{ marginBottom: 18 }}>
-        <InfoCard label="Customer" primary={invoice.customer_name || 'Walk-in Customer'} secondary={invoice.customer_phone} />
+        <InfoCard
+          label="Customer"
+          primary={
+            <div className="flex items-center gap-2">
+              <span>{invoice.customer_name || 'Walk-in Customer'}</span>
+              {invoice.customer_type === 'Doctor' && <Badge tone="purple" style={{ fontSize: 9 }}>🩺 Doctor Pricing</Badge>}
+            </div>
+          }
+          secondary={invoice.customer_phone}
+        />
         <InfoCard
           label="Doctor"
           primary={invoice.doctor_name ? `Dr. ${invoice.doctor_name}` : 'Self'}
@@ -293,9 +302,10 @@ function InvoiceDetailModal({ invoice, onClose, onPrint, onPDF, onWhatsApp }) {
           <div className="flex justify-between" style={{ marginBottom: 4 }}>
             <span className="text-muted">GST</span><span>{inr(invoice.gst_amount)}</span>
           </div>
-          {invoice.discount_amount > 0 && (
+          {(invoice.discount_amount > 0 || invoice.discount_percent > 0) && (
             <div className="flex justify-between" style={{ marginBottom: 4, color: 'var(--danger)' }}>
-              <span>Discount</span><span>-{inr(invoice.discount_amount)}</span>
+              <span>Discount{invoice.discount_percent > 0 ? ` (${invoice.discount_percent}%)` : ''}</span>
+              <span>-{inr(invoice.discount_amount)}</span>
             </div>
           )}
           <div

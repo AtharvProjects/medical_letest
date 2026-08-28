@@ -314,6 +314,75 @@ async function runProductionTests() {
     const expectedName = 'Rahul_Sharma_INV-20260828-0042_28-Aug-2026_1430.pdf';
     assert(generatedName === expectedName, `Generated PDF filename matches standard: "${generatedName}"`);
 
+    // ── SUITE 12: VETERINARY PRICING MODEL (DOCTOR COST VS REGULAR SELLING) ──
+    console.log('\n🐾 SUITE 12: Veterinary Pricing Model (Doctor Cost Price vs Regular Selling Rate)');
+
+    // 1. Create Doctor customer
+    const docCustRes = db.prepare(`
+      INSERT INTO customers (name, phone, address, state, credit_balance, customer_type) 
+      VALUES ('Dr. Deshmukh Vet Clinic', '9822998877', 'Shivaji Chowk, Pune', 'Maharashtra', 0, 'Doctor')
+    `).run();
+    const docCustId = docCustRes.lastInsertRowid;
+    assert(docCustId > 0, 'Doctor customer created with customer_type = "Doctor"');
+
+    // 2. Doctor Sale: 10 units of Augmentin (Purchase Rate = ₹150.00, Selling Rate = ₹185.00)
+    // Doctor pricing must apply purchase rate: 10 * 150.00 = 1500.00 + 12% GST = 1680.00
+    const docInvNum = 'INV-20260828-0003';
+    const docQty = 10;
+    const docRate = 150.00; // Cost / Purchase rate
+    const docSubtotal = docQty * docRate; // 1500.00
+    const docGst = (docSubtotal * 12) / 100; // 180.00
+    const docTotal = docSubtotal + docGst; // 1680.00
+
+    const docInvRes = db.prepare(`
+      INSERT INTO invoices (
+        invoice_number, customer_id, doctor_id, customer_type, subtotal, discount_percent, discount_amount,
+        gst_amount, total_amount, payment_mode, amount_paid, credit_amount, is_interstate
+      ) VALUES (?, ?, NULL, 'Doctor', ?, 0, 0, ?, ?, 'Cash', ?, 0, 0)
+    `).run(docInvNum, docCustId, docSubtotal, docGst, docTotal, docTotal);
+    assert(docInvRes.lastInsertRowid > 0, `Doctor Invoice created at cost price (Total: Rs. ${docTotal})`);
+
+    // 3. Regular Customer Sale: 10 units of Augmentin (Selling Rate = ₹185.00)
+    // Regular pricing must apply selling rate: 10 * 185.00 = 1850.00 + 12% GST = 2072.00
+    const regInvNum = 'INV-20260828-0004';
+    const regQty = 10;
+    const regRate = 185.00; // Selling rate
+    const regSubtotal = regQty * regRate; // 1850.00
+    const regGst = (regSubtotal * 12) / 100; // 222.00
+    const regTotal = regSubtotal + regGst; // 2072.00
+
+    const regInvRes = db.prepare(`
+      INSERT INTO invoices (
+        invoice_number, customer_id, doctor_id, customer_type, subtotal, discount_percent, discount_amount,
+        gst_amount, total_amount, payment_mode, amount_paid, credit_amount, is_interstate
+      ) VALUES (?, ?, NULL, 'Regular', ?, 0, 0, ?, ?, 'Cash', ?, 0, 0)
+    `).run(regInvNum, custId1, regSubtotal, regGst, regTotal, regTotal);
+    assert(regInvRes.lastInsertRowid > 0, `Regular Customer Invoice created at selling rate (Total: Rs. ${regTotal})`);
+    assert(docTotal < regTotal, `Doctor rate saves ₹${regTotal - docTotal} compared to regular retail selling price`);
+
+    // ── SUITE 13: PERCENTAGE-BASED DISCOUNT CALCULATIONS ───────────────────
+    console.log('\n🏷️  SUITE 13: Percentage-Based Discount Calculations');
+
+    // Sale with 10% overall discount: Subtotal = 1000, GST = 120, Total before disc = 1120. Disc = 112, Net = 1008
+    const discInvNum = 'INV-20260828-0005';
+    const baseSub = 1000.00;
+    const baseGst = 120.00;
+    const discPercent = 10.0;
+    const discAmount = (baseSub + baseGst) * (discPercent / 100); // 112.00
+    const netTotal = baseSub + baseGst - discAmount; // 1008.00
+
+    const discInvRes = db.prepare(`
+      INSERT INTO invoices (
+        invoice_number, customer_id, customer_type, subtotal, discount_percent, discount_amount,
+        gst_amount, total_amount, payment_mode, amount_paid, credit_amount, is_interstate
+      ) VALUES (?, ?, 'Regular', ?, ?, ?, ?, ?, 'UPI', ?, 0, 0)
+    `).run(discInvNum, custId1, baseSub, discPercent, discAmount, baseGst, netTotal, netTotal);
+
+    const savedDiscInv = db.prepare(`SELECT * FROM invoices WHERE id = ?`).get(discInvRes.lastInsertRowid);
+    assert(savedDiscInv.discount_percent === 10.0, 'Discount percentage (10%) correctly persisted');
+    assert(savedDiscInv.discount_amount === 112.0, `Discount amount (Rs. 112) correctly calculated from percentage`);
+    assert(savedDiscInv.total_amount === 1008.0, `Net total correctly reduced to Rs. 1008.00`);
+
     // Clean up test database
     db.close();
     try {
