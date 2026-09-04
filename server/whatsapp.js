@@ -491,46 +491,6 @@ const initWhatsApp = (app) => {
   app.delete('/api/whatsapp/session', handleResetSession);
   app.post('/api/whatsapp/reset', handleResetSession);
 
-  // POST /api/whatsapp/test-message — Send test ping message
-  app.post('/api/whatsapp/test-message', async (req, res) => {
-    const { phone } = req.body;
-    if (connectionStatus !== 'READY') {
-      await waitForReady(8000);
-    }
-    if (connectionStatus !== 'READY' || !client) {
-      return res.status(400).json({
-        error: connectionStatus === 'AUTHENTICATED' || connectionStatus === 'INITIALIZING'
-          ? 'WhatsApp is still synchronizing. Please wait a few seconds and try again.'
-          : 'WhatsApp is not connected. Please scan QR code in Settings > WhatsApp.'
-      });
-    }
-
-    const e164 = normalizePhone(phone);
-    if (!e164) {
-      return res.status(400).json({ error: 'Please provide a valid phone number.' });
-    }
-
-    try {
-      await ensureWWebReady(client, 4000);
-      let targetChatId = `${e164}@c.us`;
-      try {
-        const numberId = await client.getNumberId(e164);
-        if (numberId && numberId._serialized) {
-          targetChatId = numberId._serialized;
-        }
-      } catch (e) {
-        console.log('[WA] getNumberId notice (using direct chatId):', targetChatId);
-      }
-
-      const text = `👋 Hello! This is a test message from AthassMediSync Pharmacy Management System. Your WhatsApp integration is working perfectly!`;
-      await client.sendMessage(targetChatId, text);
-      res.json({ success: true, message: `Test message sent to +${e164}` });
-    } catch (err) {
-      console.error('[WA] Test message error:', err.message);
-      res.status(500).json({ error: err.message });
-    }
-  });
-
   // POST /api/whatsapp/send-pdf — Send PDF Invoice
   app.post('/api/whatsapp/send-pdf', async (req, res) => {
     const { phone, pdfBase64, filename, message } = req.body;

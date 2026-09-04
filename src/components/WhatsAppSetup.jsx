@@ -3,7 +3,7 @@ import { api } from '../services/api';
 import { useToast } from '../App';
 import {
   Phone, CheckCircle2, RefreshCw, LogOut, QrCode, WifiOff, User, Loader2,
-  Trash2, Send, AlertTriangle, MessageSquare, ShieldAlert
+  Trash2, AlertTriangle, ShieldAlert
 } from 'lucide-react';
 import { Button, Badge, ConfirmDialog } from './ui';
 
@@ -44,10 +44,6 @@ export default function WhatsAppSetup() {
   const [actionLoading, setActionLoading] = useState(false);
   const [confirmLogout, setConfirmLogout] = useState(false);
   const [confirmDeleteSession, setConfirmDeleteSession] = useState(false);
-
-  // Test Message Form
-  const [testPhone, setTestPhone] = useState('');
-  const [sendingTest, setSendingTest] = useState(false);
 
   const pollStatus = useCallback(async () => {
     try {
@@ -128,25 +124,6 @@ export default function WhatsAppSetup() {
       showToast(err.message || 'Failed to delete session', 'error');
     } finally {
       setActionLoading(false);
-    }
-  };
-
-  // Send Test Ping
-  const handleSendTestMessage = async (e) => {
-    e.preventDefault();
-    if (!testPhone.trim()) {
-      showToast('Please enter a phone number', 'error');
-      return;
-    }
-    setSendingTest(true);
-    try {
-      const res = await api.sendWhatsAppTestMessage(testPhone.trim());
-      showToast(res.message || 'Test message sent successfully!', 'success');
-      setTestPhone('');
-    } catch (err) {
-      showToast(err.message || 'Failed to send test message', 'error');
-    } finally {
-      setSendingTest(false);
     }
   };
 
@@ -259,41 +236,6 @@ export default function WhatsAppSetup() {
             >
               Check
             </Button>
-          </div>
-
-          {/* Test Message Panel */}
-          <div
-            style={{
-              background: 'var(--bg-card, #ffffff)',
-              border: '1px solid var(--border, rgba(0,0,0,0.08))',
-              borderRadius: 12,
-              padding: '14px 16px',
-              marginBottom: 20,
-            }}
-          >
-            <div style={{ fontWeight: 600, fontSize: 13, marginBottom: 8, display: 'flex', alignItems: 'center', gap: 6 }}>
-              <MessageSquare size={15} style={{ color: 'var(--primary)' }} />
-              Test WhatsApp Delivery
-            </div>
-            <form onSubmit={handleSendTestMessage} style={{ display: 'flex', gap: 8 }}>
-              <input
-                type="text"
-                value={testPhone}
-                onChange={(e) => setTestPhone(e.target.value)}
-                placeholder="Enter 10-digit mobile number…"
-                style={{
-                  flex: 1,
-                  padding: '8px 12px',
-                  borderRadius: 8,
-                  border: '1px solid var(--border, #cbd5e1)',
-                  fontSize: 13,
-                  outline: 'none',
-                }}
-              />
-              <Button variant="primary" size="sm" icon={Send} loading={sendingTest} type="submit">
-                Send Ping
-              </Button>
-            </form>
           </div>
 
           {/* Connected Actions */}
