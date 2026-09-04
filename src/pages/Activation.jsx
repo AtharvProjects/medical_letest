@@ -1,7 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import { ShieldAlert, Copy, Check, Key, Loader2 } from 'lucide-react';
+import logoImg from '../assets/logo.png';
 import { api } from '../services/api';
-import { Button, Input, FormField } from '../components/ui';
+import { Button, Input, FormField, HandwritingSvg } from '../components/ui';
 
 export default function Activation({ onActivated }) {
   const [hwid, setHwid] = useState('');
@@ -57,9 +58,21 @@ export default function Activation({ onActivated }) {
   if (loading) {
     return (
       <div style={container}>
-        <div className="glass-card" style={{ width: '100%', maxWidth: 460, textAlign: 'center', padding: 40 }}>
-          <Loader2 size={30} className="animate-spin" style={{ color: 'var(--primary)' }} />
-          <p className="text-muted" style={{ marginTop: 12 }}>Loading hardware verification…</p>
+        <div className="glass-card" style={{ width: '100%', maxWidth: 460, textAlign: 'center', padding: '48px 40px' }}>
+          <HandwritingSvg
+            text="Welcome to AthassMediSync"
+            width={420}
+            height={100}
+            fontSize={36}
+            strokeWidth={1.5}
+            duration={2.4}
+            delay={0.15}
+            style={{ display: 'block', margin: '0 auto', color: '#A94F2D' }}
+          />
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8, marginTop: 20 }}>
+            <Loader2 size={15} className="animate-spin" style={{ color: 'var(--text-muted)' }} />
+            <span className="text-muted" style={{ fontSize: 13 }}>Verifying hardware…</span>
+          </div>
         </div>
       </div>
     );
@@ -70,18 +83,20 @@ export default function Activation({ onActivated }) {
       <div className="glass-card" style={{ width: '100%', maxWidth: 460, padding: 32 }}>
         {/* Header */}
         <div style={{ textAlign: 'center', marginBottom: 24 }}>
+          <img
+            src={logoImg}
+            alt="Athass MediSync"
+            style={{ width: 240, maxWidth: '80%', height: 'auto', margin: '0 auto 16px', display: 'block' }}
+          />
           <div
             style={{
-              width: 60, height: 60, borderRadius: '50%', background: 'var(--primary-bg)',
-              display: 'inline-flex', alignItems: 'center', justifyContent: 'center', marginBottom: 14,
+              width: 48, height: 48, borderRadius: '50%', background: 'var(--primary-bg)',
+              display: 'inline-flex', alignItems: 'center', justifyContent: 'center', marginBottom: 10,
             }}
           >
-            <ShieldAlert size={28} style={{ color: 'var(--primary)' }} />
+            <ShieldAlert size={24} style={{ color: 'var(--primary)' }} />
           </div>
-          <h2 style={{ fontSize: 24, fontWeight: 800, color: 'var(--text-primary)', margin: 0, letterSpacing: '-0.3px' }}>
-            AthassMediSync
-          </h2>
-          <p style={{ fontSize: 12, fontWeight: 600, color: 'var(--primary)', margin: '4px 0 0', textTransform: 'uppercase', letterSpacing: 1 }}>
+          <p style={{ fontSize: 12, fontWeight: 700, color: 'var(--primary)', margin: 0, textTransform: 'uppercase', letterSpacing: 1 }}>
             Software Activation Required
           </p>
         </div>

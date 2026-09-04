@@ -1,8 +1,9 @@
 import React from 'react';
-import { LayoutDashboard, Receipt, FileText, Package, ShoppingCart, Users, Stethoscope, Truck, BarChart3, Settings, Archive } from 'lucide-react';
+import { Home, Receipt, FileText, Package, ShoppingCart, Users, Stethoscope, Truck, BarChart3, Settings, Archive } from 'lucide-react';
+import logoImg from '../assets/logo.png';
 
 const navItems = [
-    { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
+    { id: 'dashboard', label: 'Dashboard', icon: Home },
     { id: 'billing', label: 'Billing', icon: Receipt },
     { id: 'bills', label: 'Bills List', icon: FileText },
     { id: 'inventory', label: 'Inventory', icon: Package },
@@ -19,8 +20,17 @@ export default function Sidebar({ activePage, onNavigate }) {
   return (
     <aside className="sidebar">
       <div className="sidebar-brand">
-        <h1>Athass<br/>MediSync</h1>
-        <div className="subtitle">Pharmacy Management</div>
+        <img
+          src={logoImg}
+          alt="Athass MediSync — Pharmacy Management"
+          style={{
+            width: '100%',
+            maxWidth: 198,
+            height: 'auto',
+            display: 'block',
+            userSelect: 'none',
+          }}
+        />
       </div>
       <nav className="sidebar-nav">
         {navItems.map(item => (
@@ -30,16 +40,23 @@ export default function Sidebar({ activePage, onNavigate }) {
             onClick={() => onNavigate(item.id)}
           >
             <item.icon 
-              strokeWidth={activePage === item.id ? 2.5 : 2} 
-              fill={activePage === item.id ? "currentColor" : "none"} 
-              fillOpacity={activePage === item.id ? 0.2 : 0}
+              size={20}
+              strokeWidth={activePage === item.id ? 2.2 : 1.8} 
             />
             {item.label}
           </button>
         ))}
       </nav>
-      <div className="sidebar-footer" style={{ padding: '0 16px', marginTop: 'auto' }}>
-        <div style={{ fontSize: '11px', color: 'var(--text-muted)', fontWeight: 600 }}>SYSTEM V1.2.0</div>
+
+      {/* Promotional card */}
+      <div className="sidebar-promo">
+        <div className="promo-text">
+          Better Care,<br/>
+          Healthier Lives
+        </div>
+        <div className="promo-brand">
+          Athass MediSync · v1.2.0
+        </div>
       </div>
     </aside>
   );

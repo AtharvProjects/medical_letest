@@ -1,5 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { api } from '../services/api';
+import { Search, Bell, ChevronDown } from 'lucide-react';
+import logoMarkImg from '../assets/logo-mark.png';
 
 const pageLabels = {
   dashboard: 'Dashboard',
@@ -35,8 +37,28 @@ export default function Header({ activePage }) {
         <span className="header-date">{today}</span>
       </div>
       <div className="header-right">
-        <div className="trademark-container">
-           <div className="trademark-text">{shopName}</div>
+        {/* Global search hint */}
+        <div className="header-search">
+          <Search size={14} />
+          <span>Search medicines, customers, invoices…</span>
+          <span className="header-search-kbd">Ctrl K</span>
+        </div>
+
+        {/* Notification bell */}
+        <div className="header-bell" title="Notifications">
+          <Bell size={16} />
+        </div>
+
+        {/* User avatar */}
+        <div className="header-user">
+          <div className="header-avatar" style={{ background: '#FAF5EE', border: '1px solid var(--border)', padding: 2 }}>
+            <img src={logoMarkImg} alt="Brand" style={{ width: 22, height: 22, objectFit: 'contain' }} />
+          </div>
+          <div className="header-user-info">
+            <span className="header-user-name">{shopName}</span>
+            <span className="header-user-role">Administrator</span>
+          </div>
+          <ChevronDown size={14} style={{ color: 'var(--text-muted)' }} />
         </div>
       </div>
     </header>

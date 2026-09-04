@@ -3,13 +3,14 @@ import { api } from '../services/api';
 import { useToast } from '../App';
 import {
   Search, Trash2, Printer, FileText, Send, X, UserPlus, Stethoscope,
-  CheckCircle2, ShoppingCart,
+  CheckCircle2, ShoppingCart, User, Wallet, QrCode, Clock, ArrowRight,
 } from 'lucide-react';
 import { generateInvoicePDF, sendInvoiceViaWhatsApp } from '../services/pdf';
 import { calculateLineTotal, splitInclusive, round2 } from '../utils/billing';
 import { money, todayStr } from '../utils/format';
 import Fuse from 'fuse.js';
 import { Modal, Button, FormField, Input, Badge } from '../components/ui';
+import emptyCartIllustration from '../assets/empty-cart-illustration.png';
 
 const TABLET_LIKE = ['Tablet', 'Capsule', 'Strip'];
 const PAYMENT_MODES = ['Cash', 'UPI', 'Pending'];
@@ -497,11 +498,11 @@ export default function Billing() {
             style={{
               fontSize: 12, fontWeight: 600, padding: '4px 10px', borderRadius: 'var(--radius-md)', border: 'none', cursor: 'pointer',
               background: customerType === 'Regular' ? 'var(--primary)' : 'transparent',
-              color: customerType === 'Regular' ? '#fff' : 'var(--text-muted)',
+              color: customerType === 'Regular' ? '#fff' : 'var(--text-secondary)',
               transition: 'all 0.15s',
             }}
           >
-            👤 Regular (Selling Rate)
+            <User size={14} style={{ marginRight: 2 }} /> Regular (Selling Rate)
           </button>
           <button
             type="button"
@@ -509,12 +510,12 @@ export default function Billing() {
             disabled={billSaved}
             style={{
               fontSize: 12, fontWeight: 600, padding: '4px 10px', borderRadius: 'var(--radius-md)', border: 'none', cursor: 'pointer',
-              background: customerType === 'Doctor' ? '#8b5cf6' : 'transparent',
-              color: customerType === 'Doctor' ? '#fff' : 'var(--text-muted)',
+              background: customerType === 'Doctor' ? 'var(--upi)' : 'transparent',
+              color: customerType === 'Doctor' ? '#fff' : 'var(--text-secondary)',
               transition: 'all 0.15s',
             }}
           >
-            🩺 Doctor (Cost Price)
+            <Stethoscope size={14} style={{ marginRight: 2 }} /> Doctor (Cost Price)
           </button>
         </div>
       </div>
@@ -589,13 +590,71 @@ export default function Billing() {
           </div>
 
           {/* Cart */}
-          <div style={{ flex: 1, overflowY: 'auto', minHeight: 0 }}>
-            <div className="glass-card" style={{ padding: items.length === 0 ? 16 : 4, overflow: 'hidden' }}>
+          <div style={{ flex: 1, overflowY: 'auto', minHeight: 0, display: 'flex', flexDirection: 'column' }}>
+            <div
+              className="glass-card"
+              style={{
+                flex: items.length === 0 ? 1 : 'none',
+                padding: items.length === 0 ? '20px 16px' : 4,
+                overflow: 'hidden',
+                display: 'flex',
+                flexDirection: 'column',
+                justifyContent: items.length === 0 ? 'center' : 'flex-start',
+                alignItems: items.length === 0 ? 'center' : 'stretch',
+              }}
+            >
               {items.length === 0 ? (
-                <div className="empty-state" style={{ height: 220 }}>
-                  <ShoppingCart size={40} style={{ opacity: 0.35, marginBottom: 10 }} />
-                  <p style={{ fontWeight: 600 }}>No items yet</p>
-                  <p style={{ fontSize: 13, color: 'var(--text-muted)' }}>Search a medicine above (or press F2) to start the bill.</p>
+                <div
+                  onClick={() => searchRef.current?.focus()}
+                  style={{
+                    display: 'flex',
+                    flexDirection: 'column',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    width: '100%',
+                    height: '100%',
+                    padding: '48px 24px',
+                    cursor: 'pointer',
+                    userSelect: 'none',
+                    textAlign: 'center',
+                  }}
+                  title="Click to search medicines (F2)"
+                >
+                  <img
+                    src={emptyCartIllustration}
+                    alt=""
+                    style={{
+                      width: 180,
+                      maxWidth: '100%',
+                      height: 'auto',
+                      display: 'block',
+                      marginBottom: 16,
+                      pointerEvents: 'none',
+                    }}
+                  />
+                  <h3
+                    style={{
+                      fontSize: 22,
+                      fontWeight: 700,
+                      color: 'var(--text-primary)',
+                      margin: '0 0 8px 0',
+                      letterSpacing: '-0.3px',
+                      lineHeight: 1.25,
+                    }}
+                  >
+                    No items yet
+                  </h3>
+                  <p
+                    style={{
+                      fontSize: 14.5,
+                      color: 'var(--text-muted)',
+                      margin: 0,
+                      fontWeight: 400,
+                      lineHeight: 1.5,
+                    }}
+                  >
+                    Search for a medicine above or press F2 to start the bill.
+                  </p>
                 </div>
               ) : (
                 <table className="data-table">
@@ -749,13 +808,13 @@ export default function Billing() {
                         });
                         setShowCustDropdown(false);
                         if (newType === 'Doctor') {
-                          showToast('🩺 Doctor / Clinic selected: Switched to Purchase Cost pricing tier.', 'info');
+                          showToast('Doctor / Clinic selected: Switched to Purchase Cost pricing tier.', 'info');
                         }
                       }}
                     >
                       <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                         <span style={{ fontWeight: 500 }}>{c.name}</span>
-                        {c.customer_type === 'Doctor' && <Badge tone="purple" style={{ fontSize: 9 }}>🩺 Doctor</Badge>}
+                        {c.customer_type === 'Doctor' && <Badge tone="purple" style={{ fontSize: 9 }}>Doctor</Badge>}
                       </div>
                       {c.phone && <span className="text-muted"> · {c.phone}</span>}
                       {c.credit_balance > 0 && <Badge tone="red" style={{ marginLeft: 6 }}>{money(c.credit_balance)} due</Badge>}
@@ -823,7 +882,7 @@ export default function Billing() {
                   disabled={billSaved}
                   style={{ flex: 1 }}
                 >
-                  {mode}
+                  {mode === 'Cash' && <Wallet size={13} />}{mode === 'UPI' && <QrCode size={13} />}{mode === 'Pending' && <Clock size={13} />} {mode}
                 </Button>
               ))}
             </div>
@@ -880,8 +939,9 @@ export default function Billing() {
                 {reviewTimer > 0 ? `New Bill (${reviewTimer}s)` : 'New Bill (Enter)'}
               </Button>
             ) : (
-              <Button variant="success" onClick={handleSave} loading={saving} disabled={items.length === 0} style={{ flex: 1, height: 42, fontSize: 15 }}>
+              <Button variant="primary" icon={FileText} onClick={handleSave} loading={saving} disabled={items.length === 0} style={{ flex: 1, height: 52, fontSize: 15, borderRadius: 'var(--radius-lg)', gap: 10 }}>
                 {saving ? 'Saving…' : 'Save Bill (Enter)'}
+                {!saving && <ArrowRight size={16} />}
               </Button>
             )}
           </div>

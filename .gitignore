@@ -16,6 +16,7 @@ release/
 # WhatsApp Web.js session files
 .wwebjs_auth/
 .wwebjs_cache/
+wwebjs_auth_dev/
 
 # SQLite database files
 *.sqlite
@@ -29,4 +30,8 @@ npm-debug.log*
 .vscode/
 .idea/
 dist_electron/
+
+# Secrets — license signing key (NEVER commit the private key)
+private.pem
+scripts/private.pem
 *.lic

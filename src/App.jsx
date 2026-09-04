@@ -14,6 +14,7 @@ import Settings from './pages/Settings';
 import NonMovingMedicines from './pages/NonMovingMedicines';
 import ErrorBoundary from './components/ErrorBoundary';
 import Activation from './pages/Activation';
+import SplashScreen from './components/SplashScreen';
 import { api } from './services/api';
 
 export const ToastContext = createContext();
@@ -47,6 +48,7 @@ export default function App() {
   const [activePage, setActivePage] = useState('dashboard');
   const [toasts, setToasts] = useState([]);
   const [isLicensed, setIsLicensed] = useState(null);
+  const [splashDone, setSplashDone] = useState(false);
 
   const showToast = useCallback((message, type = 'success') => {
     const id = Date.now();
@@ -93,6 +95,15 @@ export default function App() {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [isLicensed]);
 
+  // Boot splash: plays the welcome animation on every startup for the licensed
+  // path while the license check runs in the background. Unlicensed users
+  // short-circuit straight to Activation (which shows its own welcome), so the
+  // animation never plays in full twice. If the check outlasts the splash we
+  // fall through to the lightweight "Checking license status…" text below.
+  if (isLicensed !== false && !splashDone) {
+    return <SplashScreen onDone={() => setSplashDone(true)} />;
+  }
+
   if (isLicensed === null) {
     return (
       <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', minHeight: '100vh', background: 'var(--bg-primary)', color: 'var(--text-muted)', fontSize: 14, fontFamily: 'Inter, sans-serif' }}>
@@ -121,10 +132,24 @@ export default function App() {
         </div>
       </div>
       <ToastContainer toasts={toasts} />
-      {/* Keyboard shortcut hint */}
-        <div style={{ position: 'fixed', bottom: 8, left: 12, fontSize: 10.5, color: 'var(--text-muted)', opacity: 0.65, pointerEvents: 'none', zIndex: 1000, fontWeight: 500 }}>
-          F1 Dashboard · F2 Billing · F3 Inventory · F4 Purchases · F5 Customers · F6 Doctors · F7 Suppliers · F8 Reports · F9 Settings
+      {/* Footer status bar */}
+      <div className="footer-status-bar">
+        <div className="footer-shortcuts">
+          <span>F1 Dashboard</span><span>·</span>
+          <span>F2 Billing</span><span>·</span>
+          <span>F3 Inventory</span><span>·</span>
+          <span>F4 Purchases</span><span>·</span>
+          <span>F5 Customers</span><span>·</span>
+          <span>F6 Doctors</span><span>·</span>
+          <span>F7 Suppliers</span><span>·</span>
+          <span>F8 Reports</span><span>·</span>
+          <span>F9 Settings</span>
         </div>
+        <div className="footer-status">
+          <span className="status-dot" />
+          <span>System Online</span>
+        </div>
+      </div>
     </ToastContext.Provider>
   );
 }

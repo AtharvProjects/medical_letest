@@ -12,3 +12,5 @@ export { default as Badge } from './Badge';
 export { default as StatCard } from './StatCard';
 export { default as LoadingState, Spinner } from './Spinner';
 export { FormField, Input, Select, Textarea } from './Field';
+export { default as HandwritingSvg } from './HandwritingSvg';
+
