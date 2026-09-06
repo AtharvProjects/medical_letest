@@ -4,6 +4,7 @@
   "description": "Cloud License Manager for AthassMediSync with Render Free Tier support",
   "main": "server.js",
   "scripts": {
+    "build": "echo 'No build step required for license manager'",
     "start": "node server.js",
     "dev": "node server.js"
   },
