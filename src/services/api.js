@@ -16,26 +16,51 @@ if (typeof window !== 'undefined') {
 }
 
 const API = `${BASE_URL}/api`;
-async function request(path, options = {}) {
-  const res = await fetch(`${API}${path}`, {
-    headers: { 'Content-Type': 'application/json', ...options.headers },
-    ...options,
-  });
-  
-  const contentType = res.headers.get('content-type');
-  let data;
-  if (contentType && contentType.includes('application/json')) {
-    data = await res.json();
-  } else {
-    const text = await res.text();
-    data = { error: text || res.statusText };
-  }
 
-  if (!res.ok) throw new Error(data.error || 'Request failed');
-  return data;
+async function request(path, options = {}, retries = 3) {
+  let lastError;
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      const res = await fetch(`${API}${path}`, {
+        headers: { 'Content-Type': 'application/json', ...options.headers },
+        ...options,
+      });
+
+      const contentType = res.headers.get('content-type');
+      let data;
+      if (contentType && contentType.includes('application/json')) {
+        data = await res.json();
+      } else {
+        const text = await res.text();
+        data = { error: text || res.statusText };
+      }
+
+      if (!res.ok) throw new Error(data.error || 'Request failed');
+      return data;
+    } catch (err) {
+      lastError = err;
+      const isNetworkError = err.message && (
+        err.message.includes('Failed to fetch') ||
+        err.message.includes('NetworkError') ||
+        err.message.includes('ECONNREFUSED')
+      );
+      if (isNetworkError && attempt < retries) {
+        await new Promise(r => setTimeout(r, 300 * (attempt + 1)));
+        continue;
+      }
+      throw err;
+    }
+  }
+  throw lastError;
 }
 
 export const api = {
+  // Generic HTTP Methods
+  get: (path, options) => request(path, { method: 'GET', ...options }),
+  post: (path, body, options) => request(path, { method: 'POST', body: body ? JSON.stringify(body) : undefined, ...options }),
+  put: (path, body, options) => request(path, { method: 'PUT', body: body ? JSON.stringify(body) : undefined, ...options }),
+  delete: (path, options) => request(path, { method: 'DELETE', ...options }),
+
   // Settings
   getSettings: () => request('/settings'),
   updateSettings: (data) => request('/settings', { method: 'PUT', body: JSON.stringify(data) }),

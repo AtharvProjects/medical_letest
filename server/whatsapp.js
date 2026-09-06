@@ -47,7 +47,6 @@ let lastError = null;
 let reconnectTimer = null;
 let reconnectAttempts = 0;
 let isInitializing = false;
-let waExplicitlyStarted = false;
 
 const MAX_RECONNECT_ATTEMPTS = 4;
 const RECONNECT_BASE_DELAY_MS = 6000; // 6s, 12s, 24s, 48s
@@ -183,6 +182,13 @@ const scheduleReconnect = () => {
   }, delay);
 };
 
+// ── Helper: Fast Promise Timeout Race ─────────────────────────────────────────
+const withTimeout = (promise, ms, fallbackValue) =>
+  Promise.race([
+    promise,
+    new Promise((resolve) => setTimeout(() => resolve(fallbackValue), ms)),
+  ]);
+
 // ── Helper: Ensure WWebJS and Store are injected into page ───────────────────
 const ensureWWebReady = async (clientInstance, maxWaitMs = 6000) => {
   if (!clientInstance || !clientInstance.pupPage) return false;
@@ -246,7 +252,6 @@ const startClient = async (freshStart = false) => {
   }
 
   isInitializing = true;
-  waExplicitlyStarted = true;
 
   if (reconnectTimer) {
     clearTimeout(reconnectTimer);
@@ -409,12 +414,29 @@ const normalizePhone = (raw) => {
 };
 
 // ── Express Router Registration ───────────────────────────────────────────────
+// A saved session exists once LocalAuth has persisted a linked device. Used to
+// decide whether auto-starting the headless browser on boot is worthwhile.
+const hasSavedSession = () => {
+  try {
+    return fs.existsSync(path.join(getAuthPath(), 'session-athassmedi'));
+  } catch {
+    return false;
+  }
+};
+
 const initWhatsApp = (app) => {
-  // Auto-start WhatsApp engine in background on server boot
+  // Auto-start the engine on server boot ONLY when a linked session already
+  // exists — that makes invoice sending instant for pharmacies using WhatsApp,
+  // without launching a pointless headless browser on machines that never
+  // connected it. First-time setup starts explicitly from Settings > WhatsApp.
   setTimeout(() => {
     try {
-      console.log('[WA] Background auto-initialization started on server boot...');
-      startClient(false);
+      if (hasSavedSession()) {
+        console.log('[WA] Saved session found — background auto-initialization started...');
+        startClient(false);
+      } else {
+        console.log('[WA] No saved session — engine idle until user connects from Settings.');
+      }
     } catch (err) {
       console.warn('[WA] Background auto-start notice:', err.message);
     }
@@ -426,7 +448,14 @@ const initWhatsApp = (app) => {
       const ok = await ensureWWebReady(client, 2000);
       if (ok) return true;
     }
-    if (connectionStatus === 'DISCONNECTED') {
+    // A send request is a user action — don't leave them waiting on a dead
+    // engine or a long reconnect backoff. Kick an immediate restart when the
+    // engine is down, and fast-forward any pending backoff timer.
+    if (connectionStatus === 'DISCONNECTED' || connectionStatus === 'FAILED') {
+      startClient(false);
+    } else if (connectionStatus === 'RECONNECTING' && reconnectTimer) {
+      clearTimeout(reconnectTimer);
+      reconnectTimer = null;
       startClient(false);
     }
     const start = Date.now();
@@ -518,11 +547,11 @@ const initWhatsApp = (app) => {
     }
 
     try {
-      await ensureWWebReady(client, 5000);
+      await ensureWWebReady(client, 2500);
 
       let targetChatId = `${e164}@c.us`;
       try {
-        const numberId = await client.getNumberId(e164);
+        const numberId = await withTimeout(client.getNumberId(e164), 1200, null);
         if (numberId && numberId._serialized) {
           targetChatId = numberId._serialized;
         }
@@ -538,7 +567,6 @@ const initWhatsApp = (app) => {
 
       for (let attempt = 1; attempt <= 2; attempt++) {
         try {
-          await ensureWWebReady(client, 3000);
           await client.sendMessage(targetChatId, media, {
             caption: message || 'Here is your invoice. Thank you for your business!',
             sendMediaAsDocument: true,
@@ -549,8 +577,8 @@ const initWhatsApp = (app) => {
           lastSendErr = sendErr;
           console.warn(`[WA] Send PDF attempt ${attempt} failed:`, sendErr.message);
           if (attempt === 1) {
-            await ensureWWebReady(client, 4000);
-            await new Promise((r) => setTimeout(r, 1000));
+            await ensureWWebReady(client, 3000);
+            await new Promise((r) => setTimeout(r, 600));
           }
         }
       }

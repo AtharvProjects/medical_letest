@@ -113,10 +113,10 @@ export default function DataTable({
           alignItems: 'center',
           justifyContent: 'space-between',
           padding: '10px 16px',
-          borderTop: '1px solid var(--border, rgba(0,0,0,0.06))',
-          background: 'var(--bg-glass, rgba(255,255,255,0.7))',
+          borderTop: '1px solid var(--border)',
+          background: 'var(--bg-subtle)',
           fontSize: 13,
-          color: 'var(--text-secondary, #64748b)',
+          color: 'var(--text-secondary)',
         }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
             <span>
@@ -130,9 +130,11 @@ export default function DataTable({
                 style={{
                   padding: '3px 8px',
                   borderRadius: 6,
-                  border: '1px solid var(--border, #cbd5e1)',
-                  background: 'var(--bg-card, #ffffff)',
+                  border: '1px solid var(--border-strong)',
+                  background: 'var(--bg-secondary)',
+                  color: 'var(--text-primary)',
                   fontSize: 12,
+                  fontFamily: 'inherit',
                   outline: 'none',
                   cursor: 'pointer',
                 }}
@@ -196,9 +198,9 @@ function PaginationButton({ icon: Icon, disabled, onClick, title }) {
         width: 28,
         height: 28,
         borderRadius: 6,
-        border: '1px solid var(--border, rgba(0,0,0,0.1))',
-        background: disabled ? 'transparent' : 'var(--bg-card, #ffffff)',
-        color: disabled ? 'var(--text-muted, #94a3b8)' : 'var(--text-primary, #1e293b)',
+        border: '1px solid var(--border-strong)',
+        background: disabled ? 'transparent' : 'var(--bg-secondary)',
+        color: disabled ? 'var(--text-muted)' : 'var(--text-primary)',
         cursor: disabled ? 'not-allowed' : 'pointer',
         opacity: disabled ? 0.4 : 1,
         transition: 'all 0.15s ease',

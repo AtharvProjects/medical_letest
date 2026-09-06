@@ -1,0 +1,24 @@
+services:
+  - type: web
+    name: athass-license-manager
+    env: node
+    plan: free
+    region: oregon
+    rootDir: license-manager
+    buildCommand: npm install
+    startCommand: npm start
+    autoDeploy: true
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 10000
+      - key: ADMIN_USER
+        value: admin
+      - key: ADMIN_PASSWORD
+        generateValue: true
+      - key: JWT_SECRET
+        generateValue: true
+      # Optional: Add free PostgreSQL connection string from Neon.tech or Supabase for persistent data:
+      # - key: DATABASE_URL
+      #   value: postgresql://username:password@ep-xyz.neon.tech/neondb?sslmode=require

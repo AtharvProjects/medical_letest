@@ -96,12 +96,29 @@ export default function Bills() {
       .catch(() => showToast('Failed to load invoice data', 'error'));
   };
 
-  const handleWhatsApp = async (inv) => {
-    setSendingWhatsApp(inv.id);
+  const [phonePromptInvoice, setPhonePromptInvoice] = useState(null);
+  const [customPhone, setCustomPhone] = useState('');
+
+  const handleWhatsAppClick = async (inv) => {
     try {
       const full = await api.getInvoice(inv.id);
-      await sendInvoiceViaWhatsApp(full, settings);
+      if (full.customer_phone && full.customer_phone.trim()) {
+        sendWhatsAppDirect(full, full.customer_phone);
+      } else {
+        setPhonePromptInvoice(full);
+        setCustomPhone('');
+      }
+    } catch (err) {
+      showToast('Could not fetch invoice details', 'error');
+    }
+  };
+
+  const sendWhatsAppDirect = async (fullInv, phone) => {
+    setSendingWhatsApp(fullInv.id);
+    try {
+      await sendInvoiceViaWhatsApp({ ...fullInv, customer_phone: phone }, settings);
       showToast('Invoice sent via WhatsApp successfully!', 'success');
+      setPhonePromptInvoice(null);
     } catch (err) {
       console.error(err);
       const msg = err.message || 'Could not send WhatsApp message.';
@@ -139,10 +156,10 @@ export default function Bills() {
           <Button
             variant="ghost"
             size="sm"
-            title={inv.customer_id ? 'Send via WhatsApp' : 'Walk-in invoices have no saved customer number'}
-            onClick={() => handleWhatsApp(inv)}
-            disabled={sendingWhatsApp === inv.id || !inv.customer_id}
-            style={{ color: inv.customer_id ? 'var(--success)' : undefined }}
+            title="Send PDF Invoice via WhatsApp"
+            onClick={() => handleWhatsAppClick(inv)}
+            disabled={sendingWhatsApp === inv.id}
+            style={{ color: 'var(--success)' }}
           >
             {sendingWhatsApp === inv.id ? <Spinner size={14} /> : <Send size={14} />}
           </Button>
@@ -200,8 +217,50 @@ export default function Bills() {
           onClose={() => setSelectedInvoice(null)}
           onPrint={() => handlePrint(selectedInvoice)}
           onPDF={() => handlePDF(selectedInvoice)}
-          onWhatsApp={() => handleWhatsApp(selectedInvoice)}
+          onWhatsApp={() => {
+            onClose();
+            handleWhatsAppClick(selectedInvoice);
+          }}
         />
+      )}
+
+      {/* WhatsApp Custom Mobile Number Prompt Modal */}
+      {phonePromptInvoice && (
+        <Modal
+          title="Send Invoice via WhatsApp"
+          onClose={() => setPhonePromptInvoice(null)}
+          footer={
+            <div className="flex justify-end gap-2">
+              <Button variant="secondary" onClick={() => setPhonePromptInvoice(null)}>
+                Cancel
+              </Button>
+              <Button
+                variant="primary"
+                icon={Send}
+                loading={sendingWhatsApp === phonePromptInvoice.id}
+                disabled={!customPhone.trim() || customPhone.replace(/\D/g, '').length < 10}
+                onClick={() => sendWhatsAppDirect(phonePromptInvoice, customPhone)}
+              >
+                Send WhatsApp Invoice
+              </Button>
+            </div>
+          }
+        >
+          <div>
+            <p className="text-secondary text-sm mb-3">
+              Enter the recipient's 10-digit mobile number for invoice <strong>{phonePromptInvoice.invoice_number}</strong> (Total: {inr(phonePromptInvoice.total_amount)}):
+            </p>
+            <FormField label="Mobile Number">
+              <Input
+                type="tel"
+                placeholder="e.g. 9876543210"
+                value={customPhone}
+                onChange={(e) => setCustomPhone(e.target.value)}
+                autoFocus
+              />
+            </FormField>
+          </div>
+        </Modal>
       )}
 
       {confirmDelete && (
@@ -261,8 +320,7 @@ function InvoiceDetailModal({ invoice, onClose, onPrint, onPDF, onWhatsApp }) {
             variant="success"
             icon={Send}
             onClick={onWhatsApp}
-            disabled={!invoice.customer_id}
-            title={!invoice.customer_id ? 'Walk-in invoices have no saved customer phone number' : 'Send invoice via WhatsApp'}
+            title="Send invoice via WhatsApp"
           >
             WhatsApp
           </Button>

@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { api } from '../services/api';
 import { useToast } from '../App';
 import { INDIAN_STATES } from '../utils/states';
-import { Save, Settings as SettingsIcon, Bell, Network, Building2 } from 'lucide-react';
+import { Save, Settings as SettingsIcon, Bell, Network, Building2, ShieldCheck, RefreshCw, Globe, Check, Copy } from 'lucide-react';
 import WhatsAppSetup from '../components/WhatsAppSetup';
 import BackupRestore from '../components/BackupRestore';
 import { Button, FormField, Input, Select, Textarea, LoadingState } from '../components/ui';
@@ -38,14 +38,33 @@ export default function Settings() {
     whatsapp_access_token: '',
   });
   const [networkUrl, setNetworkUrl] = useState(localStorage.getItem('network_server_url') || '');
+  const [licenseInfo, setLicenseInfo] = useState(null);
+  const [licenseServerUrl, setLicenseServerUrl] = useState('');
+  const [syncingLicense, setSyncingLicense] = useState(false);
+  const [copiedHwid, setCopiedHwid] = useState(false);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+
+  const fetchLicenseStatus = async () => {
+    try {
+      const data = await api.get('/license/status');
+      setLicenseInfo(data);
+      if (data.cloudServerUrl) {
+        setLicenseServerUrl(data.cloudServerUrl);
+      }
+    } catch (e) {
+      console.warn('Failed to load license status:', e.message);
+    }
+  };
 
   useEffect(() => {
     (async () => {
       try {
-        const data = await api.get('/settings');
-        setSettings((prev) => ({ ...prev, ...data }));
+        const [settingsData] = await Promise.all([
+          api.get('/settings'),
+          fetchLicenseStatus()
+        ]);
+        setSettings((prev) => ({ ...prev, ...settingsData }));
       } catch (err) {
         showToast('Failed to load settings', 'error');
       } finally {
@@ -59,6 +78,33 @@ export default function Settings() {
     setSettings((prev) => ({ ...prev, [name]: value }));
   };
 
+  const handleSyncLicense = async () => {
+    setSyncingLicense(true);
+    try {
+      const res = await api.post('/license/cloud-sync');
+      if (res.valid) {
+        showToast(`License verified with cloud! (Valid until ${res.expiresAt === '9999-12-31' ? 'Lifetime' : res.expiresAt})`, 'success');
+      } else if (res.status === 'suspended') {
+        showToast('License has been suspended by administrator!', 'error');
+      } else {
+        showToast(res.message || 'License sync completed.', 'info');
+      }
+      await fetchLicenseStatus();
+    } catch (err) {
+      showToast(err.message || 'Failed to sync with cloud license server.', 'error');
+    } finally {
+      setSyncingLicense(false);
+    }
+  };
+
+  const handleCopyHwid = () => {
+    if (!licenseInfo?.hardwareId) return;
+    navigator.clipboard.writeText(licenseInfo.hardwareId);
+    setCopiedHwid(true);
+    setTimeout(() => setCopiedHwid(false), 2000);
+    showToast('Hardware ID copied to clipboard!', 'success');
+  };
+
   const handleSubmit = async (e) => {
     e.preventDefault();
     setSaving(true);
@@ -66,7 +112,13 @@ export default function Settings() {
       await api.put('/settings', settings);
       if (networkUrl) localStorage.setItem('network_server_url', networkUrl);
       else localStorage.removeItem('network_server_url');
-      showToast('Settings saved. If you changed the Network Server URL, restart the app to apply.', 'success');
+
+      if (licenseServerUrl) {
+        await api.post('/license/server-url', { serverUrl: licenseServerUrl.trim() });
+      }
+
+      showToast('Settings saved successfully.', 'success');
+      await fetchLicenseStatus();
     } catch (err) {
       showToast(err.message || 'Failed to save settings', 'error');
     } finally {
@@ -179,8 +231,89 @@ export default function Settings() {
           </div>
         </div>
 
-        {/* Right column: WhatsApp Integration and Backup & Restore */}
+        {/* Right column: License, WhatsApp Integration and Backup & Restore */}
         <div className="flex flex-col" style={{ gap: 16 }}>
+          {/* Cloud License & Machine Card */}
+          <div className="glass-card">
+            <SectionHead icon={ShieldCheck} title="License & Cloud Access" />
+            
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 14 }}>
+              <div>
+                <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-primary)' }}>License Status</span>
+                <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+                  {licenseInfo?.cloudStoreName ? `Registered to: ${licenseInfo.cloudStoreName}` : 'Local Machine Activation'}
+                </div>
+              </div>
+              <span
+                style={{
+                  padding: '4px 10px',
+                  borderRadius: 20,
+                  fontSize: 11,
+                  fontWeight: 700,
+                  background: licenseInfo?.licensed ? 'rgba(16, 185, 129, 0.15)' : 'rgba(239, 68, 68, 0.15)',
+                  color: licenseInfo?.licensed ? '#10b981' : '#ef4444',
+                  border: `1px solid ${licenseInfo?.licensed ? 'rgba(16, 185, 129, 0.3)' : 'rgba(239, 68, 68, 0.3)'}`
+                }}
+              >
+                {licenseInfo?.licensed ? 'ACTIVE' : 'UNLICENSED'}
+              </span>
+            </div>
+
+            <div style={{ background: 'var(--bg-subtle)', borderRadius: 'var(--radius-md)', padding: 12, marginBottom: 14, border: '1px solid var(--border)' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+                <span className="text-muted" style={{ fontSize: 10, fontWeight: 600, textTransform: 'uppercase' }}>Hardware ID</span>
+                <button
+                  type="button"
+                  onClick={handleCopyHwid}
+                  style={{ background: 'none', border: 'none', color: 'var(--primary)', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 4, fontSize: 11, fontWeight: 600 }}
+                >
+                  {copiedHwid ? <Check size={12} /> : <Copy size={12} />}
+                  {copiedHwid ? 'Copied' : 'Copy'}
+                </button>
+              </div>
+              <div style={{ fontFamily: 'monospace', fontSize: 13, fontWeight: 600, wordBreak: 'break-all', color: 'var(--text-primary)' }}>
+                {licenseInfo?.hardwareId || '—'}
+              </div>
+            </div>
+
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginBottom: 14 }}>
+              <div style={{ background: 'var(--bg-subtle)', padding: 10, borderRadius: 'var(--radius-md)', border: '1px solid var(--border)' }}>
+                <span className="text-muted" style={{ fontSize: 10, fontWeight: 600, textTransform: 'uppercase', display: 'block' }}>Expiry Date</span>
+                <span style={{ fontSize: 13, fontWeight: 600 }}>
+                  {licenseInfo?.expiry === '9999-12-31' ? 'Lifetime Access' : (licenseInfo?.expiry || 'N/A')}
+                </span>
+              </div>
+              <div style={{ background: 'var(--bg-subtle)', padding: 10, borderRadius: 'var(--radius-md)', border: '1px solid var(--border)' }}>
+                <span className="text-muted" style={{ fontSize: 10, fontWeight: 600, textTransform: 'uppercase', display: 'block' }}>Cloud License Key</span>
+                <span style={{ fontSize: 12, fontWeight: 600, fontFamily: 'monospace' }}>
+                  {licenseInfo?.cloudLicenseKey || 'Offline Key'}
+                </span>
+              </div>
+            </div>
+
+            <FormField label="Cloud License Server URL" hint="Points to your Render cloud license manager.">
+              <Input
+                value={licenseServerUrl}
+                onChange={(e) => setLicenseServerUrl(e.target.value)}
+                placeholder="https://athass-license-manager.onrender.com"
+                style={{ fontSize: 12 }}
+              />
+            </FormField>
+
+            <div style={{ marginTop: 14 }}>
+              <Button
+                type="button"
+                variant="secondary"
+                icon={RefreshCw}
+                loading={syncingLicense}
+                onClick={handleSyncLicense}
+                style={{ width: '100%' }}
+              >
+                {syncingLicense ? 'Connecting to Cloud…' : 'Sync License Status with Cloud'}
+              </Button>
+            </div>
+          </div>
+
           <WhatsAppSetup />
           <BackupRestore />
         </div>

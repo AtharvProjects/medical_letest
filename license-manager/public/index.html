@@ -1,0 +1,376 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AthassMediSync — Cloud License Manager</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div id="app">
+    <!-- Login Screen -->
+    <div id="loginSection" class="login-container">
+      <div class="glass-card login-card">
+        <div class="login-header">
+          <div class="brand-badge">AMS CLOUD</div>
+          <h2>AthassMediSync</h2>
+          <p class="subtitle">Cloud License Manager & Remote Control</p>
+        </div>
+        <form id="loginForm">
+          <div class="form-group">
+            <label for="loginUser">Username</label>
+            <input type="text" id="loginUser" placeholder="admin" required autocomplete="username">
+          </div>
+          <div class="form-group">
+            <label for="loginPass">Password</label>
+            <input type="password" id="loginPass" placeholder="••••••••" required autocomplete="current-password">
+          </div>
+          <div id="loginError" class="alert-box error hidden"></div>
+          <button type="submit" id="btnLogin" class="btn btn-primary btn-block">
+            Sign In to Dashboard
+          </button>
+        </form>
+        <div class="login-footer">
+          <span>Protected by RSA-2048 Cryptography</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Main Dashboard -->
+    <div id="dashboardSection" class="dashboard-container hidden">
+      <!-- Navbar -->
+      <header class="navbar glass-header">
+        <div class="nav-left">
+          <div class="logo-group">
+            <div class="logo-icon">🛡️</div>
+            <div>
+              <h1 class="logo-title">AthassMediSync</h1>
+              <span class="logo-sub">Remote License Control</span>
+            </div>
+          </div>
+        </div>
+        <div class="nav-right">
+          <div class="nav-user">
+            <span class="online-indicator"></span>
+            <span id="navAdminName">admin</span>
+          </div>
+          <button id="btnBackup" class="btn btn-ghost btn-sm" title="Backup & Restore">
+            💾 Backup
+          </button>
+          <button id="btnChangePass" class="btn btn-ghost btn-sm" title="Change Password">
+            🔑 Password
+          </button>
+          <button id="btnLogout" class="btn btn-outline btn-sm">
+            Sign Out
+          </button>
+        </div>
+      </header>
+
+      <!-- Content Container -->
+      <main class="main-content">
+        <!-- Stats Row -->
+        <section class="stats-grid">
+          <div class="glass-card stat-card">
+            <div class="stat-info">
+              <span class="stat-label">Total Licenses</span>
+              <span class="stat-value" id="statTotal">0</span>
+            </div>
+            <div class="stat-icon icon-blue">📋</div>
+          </div>
+          <div class="glass-card stat-card">
+            <div class="stat-info">
+              <span class="stat-label">Active Clients</span>
+              <span class="stat-value" id="statActive">0</span>
+            </div>
+            <div class="stat-icon icon-green">🟢</div>
+          </div>
+          <div class="glass-card stat-card">
+            <div class="stat-info">
+              <span class="stat-label">Expired</span>
+              <span class="stat-value" id="statExpired">0</span>
+            </div>
+            <div class="stat-icon icon-amber">⏳</div>
+          </div>
+          <div class="glass-card stat-card">
+            <div class="stat-info">
+              <span class="stat-label">Suspended / Revoked</span>
+              <span class="stat-value" id="statSuspended">0</span>
+            </div>
+            <div class="stat-icon icon-red">🛑</div>
+          </div>
+        </section>
+
+        <!-- Actions & Filter Bar -->
+        <section class="toolbar-section">
+          <div class="search-box">
+            <span class="search-icon">🔍</span>
+            <input type="text" id="searchInput" placeholder="Search by Client, Medical Store, Phone, HWID, or Key...">
+          </div>
+          <div class="filter-tabs">
+            <button class="tab-btn active" data-status="all">All</button>
+            <button class="tab-btn" data-status="active">Active</button>
+            <button class="tab-btn" data-status="expired">Expired</button>
+            <button class="tab-btn" data-status="suspended">Suspended</button>
+          </div>
+          <button id="btnNewLicense" class="btn btn-primary">
+            + Issue New License
+          </button>
+        </section>
+
+        <!-- Licenses Table & List -->
+        <section class="glass-card table-card">
+          <div class="table-responsive">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>Client & Store</th>
+                  <th>License Key</th>
+                  <th>Phone / WhatsApp</th>
+                  <th>Hardware ID (Machine)</th>
+                  <th>Plan & Expiry</th>
+                  <th>Status</th>
+                  <th>Last Ping</th>
+                  <th style="text-align: right;">Actions</th>
+                </tr>
+              </thead>
+              <tbody id="licensesTableBody">
+                <tr>
+                  <td colspan="8" class="text-center py-4">Loading licenses...</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <div id="emptyState" class="empty-state hidden">
+            <div class="empty-icon">📭</div>
+            <h3>No Licenses Found</h3>
+            <p>Issue your first software license to give remote client access.</p>
+            <button class="btn btn-primary" onclick="openNewLicenseModal()">+ Issue License</button>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <!-- Modal: Create New License -->
+    <div id="modalNewLicense" class="modal-overlay hidden">
+      <div class="glass-card modal-card">
+        <div class="modal-header">
+          <h3>Issue New Client License</h3>
+          <button class="modal-close" onclick="closeModal('modalNewLicense')">&times;</button>
+        </div>
+        <form id="formNewLicense">
+          <div class="form-row">
+            <div class="form-group">
+              <label>Doctor / Client Name *</label>
+              <input type="text" id="nlClientName" placeholder="e.g. Dr. Rajesh Sharma" required>
+            </div>
+            <div class="form-group">
+              <label>Pharmacy / Store Name *</label>
+              <input type="text" id="nlStoreName" placeholder="e.g. Shree Ganesh Medicals" required>
+            </div>
+          </div>
+          <div class="form-row">
+            <div class="form-group">
+              <label>Phone / WhatsApp Number</label>
+              <input type="tel" id="nlPhone" placeholder="e.g. +91 9876543210">
+            </div>
+            <div class="form-group">
+              <label>Client Email (Optional)</label>
+              <input type="email" id="nlEmail" placeholder="client@example.com">
+            </div>
+          </div>
+          <div class="form-row">
+            <div class="form-group">
+              <label>License Plan / Duration</label>
+              <select id="nlPlanType">
+                <option value="trial_7">7-Day Free Trial</option>
+                <option value="trial_14">14-Day Free Trial</option>
+                <option value="1_month">1 Month</option>
+                <option value="3_months">3 Months</option>
+                <option value="6_months">6 Months</option>
+                <option value="1_year" selected>1 Year Full License</option>
+                <option value="lifetime">Lifetime Access</option>
+                <option value="custom">Custom Date</option>
+              </select>
+            </div>
+            <div class="form-group hidden" id="nlCustomDateGroup">
+              <label>Custom Expiry Date</label>
+              <input type="date" id="nlCustomDate">
+            </div>
+            <div class="form-group">
+              <label>Hardware ID (Optional)</label>
+              <input type="text" id="nlHwid" placeholder="Leave blank to auto-bind on first activation" style="font-family: monospace;">
+            </div>
+          </div>
+          <div class="form-group">
+            <label>Notes / Remarks</label>
+            <input type="text" id="nlNotes" placeholder="e.g. Pune branch, paid cash, referral discount">
+          </div>
+          <div class="modal-footer">
+            <button type="button" class="btn btn-ghost" onclick="closeModal('modalNewLicense')">Cancel</button>
+            <button type="submit" class="btn btn-primary">Generate License Key</button>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <!-- Modal: Extend License -->
+    <div id="modalExtend" class="modal-overlay hidden">
+      <div class="glass-card modal-card modal-sm">
+        <div class="modal-header">
+          <h3>Extend License</h3>
+          <button class="modal-close" onclick="closeModal('modalExtend')">&times;</button>
+        </div>
+        <div id="extendClientInfo" class="modal-subtext"></div>
+        <form id="formExtend">
+          <input type="hidden" id="extendLicId">
+          <div class="form-group">
+            <label>Select Extension Duration</label>
+            <div class="quick-chips">
+              <button type="button" class="chip-btn" onclick="setExtendDays(7)">+7 Days</button>
+              <button type="button" class="chip-btn" onclick="setExtendDays(30)">+30 Days</button>
+              <button type="button" class="chip-btn" onclick="setExtendDays(90)">+3 Months</button>
+              <button type="button" class="chip-btn" onclick="setExtendDays(365)">+1 Year</button>
+              <button type="button" class="chip-btn" onclick="setExtendDays('lifetime')">Lifetime</button>
+            </div>
+          </div>
+          <div class="form-group" style="margin-top: 14px;">
+            <label>Or Set Specific Expiry Date</label>
+            <input type="date" id="extendCustomDate">
+          </div>
+          <div class="modal-footer">
+            <button type="button" class="btn btn-ghost" onclick="closeModal('modalExtend')">Cancel</button>
+            <button type="submit" class="btn btn-primary">Extend & Activate</button>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <!-- Modal: Offline RSA Key -->
+    <div id="modalOfflineKey" class="modal-overlay hidden">
+      <div class="glass-card modal-card">
+        <div class="modal-header">
+          <h3>Offline Cryptographic License Key</h3>
+          <button class="modal-close" onclick="closeModal('modalOfflineKey')">&times;</button>
+        </div>
+        <p class="modal-subtext">
+          Use this key for clients whose computers have <strong>no internet connection</strong>.
+          AthassMediSync will verify this key locally using its built-in RSA public key.
+        </p>
+        <div class="form-group">
+          <label>Target Machine Hardware ID</label>
+          <div class="copy-input-row">
+            <input type="text" id="offHwidDisplay" readonly style="font-family: monospace;">
+          </div>
+        </div>
+        <div class="form-group">
+          <label>Cryptographically Signed Offline Key (AMS-LIC-...)</label>
+          <div class="copy-input-row">
+            <textarea id="offKeyDisplay" readonly rows="4" style="font-family: monospace; font-size: 11px;"></textarea>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-primary" id="btnCopyOfflineKey">
+            📋 Copy Key
+          </button>
+          <button type="button" class="btn btn-ghost" onclick="closeModal('modalOfflineKey')">Done</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Modal: WhatsApp Share -->
+    <div id="modalWhatsApp" class="modal-overlay hidden">
+      <div class="glass-card modal-card">
+        <div class="modal-header">
+          <h3>Send License via WhatsApp</h3>
+          <button class="modal-close" onclick="closeModal('modalWhatsApp')">&times;</button>
+        </div>
+        <p class="modal-subtext">Review the pre-formatted WhatsApp message before sending to the client:</p>
+        <div class="form-group">
+          <label>Recipient WhatsApp Number</label>
+          <input type="tel" id="waRecipientPhone" placeholder="+91 9876543210">
+        </div>
+        <div class="form-group">
+          <label>Message Preview</label>
+          <textarea id="waMessagePreview" rows="7" style="font-size: 13px; line-height: 1.5;"></textarea>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-ghost" onclick="closeModal('modalWhatsApp')">Cancel</button>
+          <button type="button" class="btn btn-whatsapp" id="btnSendWhatsApp">
+            📱 Open in WhatsApp
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Modal: Change Password -->
+    <div id="modalPass" class="modal-overlay hidden">
+      <div class="glass-card modal-card modal-sm">
+        <div class="modal-header">
+          <h3>Change Admin Password</h3>
+          <button class="modal-close" onclick="closeModal('modalPass')">&times;</button>
+        </div>
+        <form id="formChangePass">
+          <div class="form-group">
+            <label>Current Password</label>
+            <input type="password" id="passCurrent" required>
+          </div>
+          <div class="form-group">
+            <label>New Password</label>
+            <input type="password" id="passNew" required minlength="6">
+          </div>
+          <div class="form-group">
+            <label>Confirm New Password</label>
+            <input type="password" id="passConfirm" required minlength="6">
+          </div>
+          <div id="passAlert" class="alert-box error hidden"></div>
+          <div class="modal-footer">
+            <button type="button" class="btn btn-ghost" onclick="closeModal('modalPass')">Cancel</button>
+            <button type="submit" class="btn btn-primary">Update Password</button>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <!-- Modal: Backup & Restore -->
+    <div id="modalBackup" class="modal-overlay hidden">
+      <div class="glass-card modal-card">
+        <div class="modal-header">
+          <h3>Database Backup & Restore</h3>
+          <button class="modal-close" onclick="closeModal('modalBackup')">&times;</button>
+        </div>
+        <p class="modal-subtext">
+          Easily export all client license data as a JSON file or restore from a previous backup.
+        </p>
+        <div class="backup-grid">
+          <div class="backup-box">
+            <h4>Export Backup</h4>
+            <p>Download a complete snapshot of all licenses, client data, and HWID bindings.</p>
+            <button type="button" class="btn btn-primary btn-block" id="btnExportJson">
+              ⬇️ Download JSON Backup
+            </button>
+          </div>
+          <div class="backup-box">
+            <h4>Restore from Backup</h4>
+            <p>Import licenses from a previously exported JSON backup file.</p>
+            <input type="file" id="fileRestoreJson" accept=".json" class="hidden">
+            <button type="button" class="btn btn-outline btn-block" onclick="document.getElementById('fileRestoreJson').click()">
+              ⬆️ Upload JSON File
+            </button>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-ghost" onclick="closeModal('modalBackup')">Close</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Toast Notification -->
+    <div id="toast" class="toast hidden"></div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

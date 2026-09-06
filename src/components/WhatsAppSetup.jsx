@@ -140,7 +140,7 @@ export default function WhatsAppSetup() {
               width: 38,
               height: 38,
               borderRadius: 10,
-              background: status === 'READY' ? 'var(--success, #16a34a)' : 'var(--primary, #0284c7)',
+              background: status === 'READY' ? 'var(--success)' : 'var(--primary)',
               display: 'flex',
               alignItems: 'center',
               justifyContent: 'center',
@@ -188,9 +188,9 @@ export default function WhatsAppSetup() {
         <div>
           <div
             style={{
-              background: 'rgba(34, 197, 94, 0.08)',
-              border: '1px solid rgba(34, 197, 94, 0.25)',
-              borderRadius: 14,
+              background: 'var(--success-bg)',
+              border: '1px solid var(--success)',
+              borderRadius: 'var(--radius-lg)',
               padding: '16px 20px',
               marginBottom: 20,
               display: 'flex',
@@ -204,7 +204,7 @@ export default function WhatsAppSetup() {
                   width: 44,
                   height: 44,
                   borderRadius: '50%',
-                  background: 'var(--success, #16a34a)',
+                  background: 'var(--success)',
                   display: 'flex',
                   alignItems: 'center',
                   justifyContent: 'center',
@@ -215,12 +215,12 @@ export default function WhatsAppSetup() {
               </div>
               <div>
                 <div style={{ fontWeight: 700, fontSize: 16, color: 'var(--text-primary)' }}>
-                  {info?.name || 'Athass Pharmacy Account'}
+                  {info?.name || 'Connected Account'}
                 </div>
                 <div style={{ fontSize: 13, color: 'var(--text-secondary)', marginTop: 2 }}>
                   {info?.number ? `+${info.number}` : 'Connected Device'}
                 </div>
-                <div style={{ fontSize: 11, color: '#15803d', fontWeight: 600, marginTop: 4 }}>
+                <div style={{ fontSize: 11, color: 'var(--success)', fontWeight: 600, marginTop: 4 }}>
                   ● Active & ready for instant 1-click invoice dispatch
                 </div>
               </div>
@@ -252,7 +252,7 @@ export default function WhatsAppSetup() {
               variant="ghost"
               icon={Trash2}
               onClick={() => setConfirmDeleteSession(true)}
-              style={{ color: 'var(--danger, #dc2626)' }}
+              style={{ color: 'var(--danger)' }}
             >
               Delete Session & Reconnect
             </Button>
@@ -273,8 +273,8 @@ export default function WhatsAppSetup() {
               background: '#ffffff',
               padding: 16,
               borderRadius: 16,
-              border: '2px solid var(--primary, #0284c7)',
-              boxShadow: '0 10px 25px rgba(2, 132, 199, 0.15)',
+              border: '2px solid var(--primary)',
+              boxShadow: 'var(--shadow-lg)',
               marginBottom: 16,
             }}
           >
@@ -324,7 +324,7 @@ export default function WhatsAppSetup() {
         <div style={{ textAlign: 'center', padding: '30px 10px' }}>
           <Loader2
             size={36}
-            style={{ color: 'var(--primary, #0284c7)', margin: '0 auto 16px' }}
+            style={{ color: 'var(--primary)', margin: '0 auto 16px' }}
             className="animate-spin"
           />
           <div style={{ fontWeight: 700, fontSize: 16, color: 'var(--text-primary)', marginBottom: 6 }}>
@@ -347,7 +347,7 @@ export default function WhatsAppSetup() {
               variant="ghost"
               size="sm"
               icon={Trash2}
-              style={{ color: 'var(--danger, #dc2626)' }}
+              style={{ color: 'var(--danger)' }}
               onClick={() => setConfirmDeleteSession(true)}
             >
               Cancel & Reset Session
@@ -364,14 +364,14 @@ export default function WhatsAppSetup() {
               width: 58,
               height: 58,
               borderRadius: '50%',
-              background: 'rgba(239, 68, 68, 0.1)',
+              background: 'var(--danger-bg)',
               display: 'flex',
               alignItems: 'center',
               justifyContent: 'center',
               margin: '0 auto 16px',
             }}
           >
-            <WifiOff size={26} style={{ color: 'var(--danger, #ef4444)' }} />
+            <WifiOff size={26} style={{ color: 'var(--danger)' }} />
           </div>
 
           <div style={{ fontWeight: 700, fontSize: 16, color: 'var(--text-primary)', marginBottom: 6 }}>

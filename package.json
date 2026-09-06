@@ -34,10 +34,11 @@
     },
     "nsis": {
       "oneClick": false,
+      "perMachine": true,
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
       "runAfterFinish": true,
-      "include": "build/uninstaller.nsh"
+      "include": "build/installer.nsh"
     },
     "asar": true
   },

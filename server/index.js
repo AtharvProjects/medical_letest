@@ -22,12 +22,27 @@ app.use(express.json({ limit: '50mb' })); // Increased limit for PDF base64
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 app.use(express.text({ limit: '50mb', type: 'text/csv' }));
 
-const { getHardwareId, verifyLicenseKey, isAppLicensed } = require('./license');
+const {
+  getHardwareId,
+  verifyLicenseKey,
+  isAppLicensed,
+  saveLicenseKeyMirror,
+  getCloudServerUrl,
+  setCloudServerUrl,
+  activateOnline,
+  syncWithCloud
+} = require('./license');
 
 // License Check Middleware
 app.use((req, res, next) => {
   // Allow license endpoints without checking license status
-  if (req.path === '/api/license/status' || req.path === '/api/license/activate') {
+  if (
+    req.path === '/api/license/status' ||
+    req.path === '/api/license/activate' ||
+    req.path === '/api/license/online-activate' ||
+    req.path === '/api/license/cloud-sync' ||
+    req.path === '/api/license/server-url'
+  ) {
     return next();
   }
 
@@ -56,16 +71,27 @@ app.get('/api/license/status', (req, res) => {
       }
     }
 
+    const cloudKeyRow = db.prepare("SELECT value FROM settings WHERE key = 'cloud_license_key'").get();
+    const cloudStatusRow = db.prepare("SELECT value FROM settings WHERE key = 'cloud_status'").get();
+    const cloudSyncRow = db.prepare("SELECT value FROM settings WHERE key = 'cloud_synced_at'").get();
+    const storeNameRow = db.prepare("SELECT value FROM settings WHERE key = 'cloud_store_name'").get();
+
     res.json({
       licensed,
       hardwareId: hwid,
-      expiry
+      expiry,
+      cloudLicenseKey: cloudKeyRow?.value || null,
+      cloudStatus: cloudStatusRow?.value || 'unlinked',
+      cloudSyncedAt: cloudSyncRow?.value || null,
+      cloudStoreName: storeNameRow?.value || null,
+      cloudServerUrl: getCloudServerUrl()
     });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
+// Offline Manual Key Activation
 app.post('/api/license/activate', (req, res) => {
   const { key } = req.body;
   if (!key) {
@@ -78,9 +104,11 @@ app.post('/api/license/activate', (req, res) => {
       return res.status(400).json({ error: verification.reason });
     }
 
-    // Save key to settings database table
+    // Save key to settings database table and mirror file
     db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('license_key', ?)").run(key);
-    logAction('LICENSE_ACTIVATED', 'System', null, null, { expiry: verification.expiry });
+    db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('cloud_status', ?)").run('active');
+    saveLicenseKeyMirror(key);
+    logAction('LICENSE_ACTIVATED', 'System', null, null, { expiry: verification.expiry, hwid: verification.hwid });
 
     res.json({
       success: true,
@@ -91,6 +119,70 @@ app.post('/api/license/activate', (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+
+// Online Cloud Activation (1-click using AMS-PRO-XXXX-XXXX)
+app.post('/api/license/online-activate', async (req, res) => {
+  const { key, serverUrl } = req.body;
+  if (!key) {
+    return res.status(400).json({ error: 'License key is required.' });
+  }
+
+  try {
+    const result = await activateOnline(key, serverUrl);
+    if (!result.success) {
+      return res.status(400).json({ error: result.error });
+    }
+
+    logAction('ONLINE_LICENSE_ACTIVATED', 'System', null, null, {
+      expiry: result.expiresAt,
+      clientName: result.clientName,
+      storeName: result.storeName
+    });
+
+    res.json({
+      success: true,
+      message: result.message,
+      expiry: result.expiresAt,
+      clientName: result.clientName,
+      storeName: result.storeName
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Trigger Cloud Sync / Heartbeat
+app.post('/api/license/cloud-sync', async (req, res) => {
+  try {
+    const result = await syncWithCloud();
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Manage Cloud Server URL
+app.get('/api/license/server-url', (req, res) => {
+  res.json({ serverUrl: getCloudServerUrl() });
+});
+
+app.post('/api/license/server-url', (req, res) => {
+  const { serverUrl } = req.body;
+  if (!serverUrl || !serverUrl.trim()) {
+    return res.status(400).json({ error: 'Server URL is required' });
+  }
+  setCloudServerUrl(serverUrl.trim());
+  res.json({ success: true, serverUrl: getCloudServerUrl() });
+});
+
+// Background Cloud Sync on launch & interval
+setTimeout(() => {
+  syncWithCloud().catch(() => {});
+}, 6000); // 6s after launch
+setInterval(() => {
+  syncWithCloud().catch(() => {});
+}, 6 * 60 * 60 * 1000); // Every 6 hours
+
 
 // Initialize WhatsApp
 initWhatsApp(app);
@@ -196,15 +288,19 @@ app.get('/api/dashboard', (req, res) => {
       WHERE date(purchase_date) >= ?
     `).get(monthStart);
 
-    // Real gross profit for the month = net (ex-GST) revenue of items sold − their COGS.
-    // This is a true margin, not the sales−purchases cashflow it used to show (a big
-    // restock month would otherwise look like a loss).
+    // Real gross profit for the month = net (ex-GST) revenue of items sold − their COGS,
+    // accurately deducting invoice-level discounts so profits are not overstated.
     const monthlyProfit = db.prepare(`
-      SELECT COALESCE(SUM(ii.total) - SUM(${LINE_COGS_SQL}), 0) as total
+      WITH item_cogs AS (
+        SELECT ii.invoice_id, SUM(${LINE_COGS_SQL}) as cogs
+        FROM invoice_items ii
+        JOIN batches b ON b.id = ii.batch_id
+        JOIN medicines m ON m.id = ii.medicine_id
+        GROUP BY ii.invoice_id
+      )
+      SELECT COALESCE(SUM(i.subtotal - i.discount_amount - COALESCE(ic.cogs, 0)), 0) as total
       FROM invoices i
-      JOIN invoice_items ii ON ii.invoice_id = i.id
-      JOIN batches b ON b.id = ii.batch_id
-      JOIN medicines m ON m.id = ii.medicine_id
+      LEFT JOIN item_cogs ic ON ic.invoice_id = i.id
       WHERE date(i.created_at) >= ?
     `).get(monthStart);
 
@@ -282,9 +378,9 @@ app.get('/api/reports/gst', (req, res) => {
   try {
     const sales = db.prepare(`
       SELECT strftime('%Y-%m', created_at) as month, 
-             SUM(subtotal) as taxable_value, 
-             SUM(gst_amount) as total_gst, 
-             SUM(total_amount) as total_sales
+             ROUND(SUM(subtotal - discount_amount), 2) as taxable_value, 
+             ROUND(SUM(gst_amount), 2) as total_gst, 
+             ROUND(SUM(total_amount), 2) as total_sales
       FROM invoices
       WHERE date(created_at) BETWEEN ? AND ?
       GROUP BY month
@@ -401,13 +497,19 @@ app.get('/api/reports/profit', (req, res) => {
   const { from, to } = req.query;
   try {
     const rows = db.prepare(`
+      WITH item_cogs AS (
+        SELECT ii.invoice_id, SUM(${LINE_COGS_SQL}) as cogs
+        FROM invoice_items ii
+        JOIN batches b ON b.id = ii.batch_id
+        JOIN medicines m ON m.id = ii.medicine_id
+        GROUP BY ii.invoice_id
+      )
       SELECT date(i.created_at) as date,
-             SUM(ii.total) as revenue,
-             SUM(${LINE_COGS_SQL}) as cost
+             ROUND(SUM(i.subtotal - i.discount_amount), 2) as revenue,
+             ROUND(SUM(COALESCE(ic.cogs, 0)), 2) as cost,
+             ROUND(SUM(i.subtotal - i.discount_amount - COALESCE(ic.cogs, 0)), 2) as profit
       FROM invoices i
-      JOIN invoice_items ii ON ii.invoice_id = i.id
-      JOIN batches b ON b.id = ii.batch_id
-      JOIN medicines m ON m.id = ii.medicine_id
+      LEFT JOIN item_cogs ic ON ic.invoice_id = i.id
       WHERE date(i.created_at) BETWEEN ? AND ?
       GROUP BY date(i.created_at)
       ORDER BY date ASC
@@ -2210,16 +2312,26 @@ app.get('/api/reports/profitability', (req, res) => {
   const { from, to } = req.query;
   try {
     let query = `
+      WITH item_cogs AS (
+        SELECT ii.invoice_id, SUM(${LINE_COGS_SQL}) as cogs
+        FROM invoice_items ii
+        JOIN batches b ON ii.batch_id = b.id
+        JOIN medicines m ON ii.medicine_id = m.id
+        GROUP BY ii.invoice_id
+      )
       SELECT
         date(i.created_at) as sale_date,
         COUNT(DISTINCT i.id) as bills,
-        SUM(ii.total) as sales_value,
-        SUM(${LINE_COGS_SQL}) as purchase_cost,
-        SUM(ii.total) - SUM(${LINE_COGS_SQL}) as gross_profit
+        ROUND(SUM(i.total_amount), 2) as sales_value,
+        ROUND(SUM(COALESCE(ic.cogs, 0)), 2) as purchase_cost,
+        ROUND(SUM(i.subtotal - i.discount_amount - COALESCE(ic.cogs, 0)), 2) as gross_profit,
+        CASE 
+          WHEN SUM(i.subtotal - i.discount_amount) > 0 
+          THEN ROUND(((SUM(i.subtotal - i.discount_amount - COALESCE(ic.cogs, 0))) / SUM(i.subtotal - i.discount_amount)) * 100, 1)
+          ELSE 0 
+        END as margin_percent
       FROM invoices i
-      JOIN invoice_items ii ON i.id = ii.invoice_id
-      JOIN batches b ON ii.batch_id = b.id
-      JOIN medicines m ON ii.medicine_id = m.id
+      LEFT JOIN item_cogs ic ON ic.invoice_id = i.id
       WHERE 1=1
     `;
     const params = [];

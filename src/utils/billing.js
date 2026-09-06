@@ -41,7 +41,9 @@ export const numberToWords = (amount) => {
   const teens = ['Ten', 'Eleven', 'Twelve', 'Thirteen', 'Fourteen', 'Fifteen', 'Sixteen', 'Seventeen', 'Eighteen', 'Nineteen'];
 
   function convert_millions(num) {
-    if (num >= 100000) {
+    if (num >= 10000000) {
+      return convert_millions(Math.floor(num / 10000000)) + " Crore " + convert_millions(num % 10000000);
+    } else if (num >= 100000) {
       return convert_millions(Math.floor(num / 100000)) + " Lakh " + convert_thousands(num % 100000);
     } else {
       return convert_thousands(num);
@@ -81,8 +83,9 @@ export const numberToWords = (amount) => {
   if (fraction > 0) {
     result += " and " + convert_tens(fraction) + " Paise";
   }
-  
-  return result + " Only";
+
+  // Collapse double spaces left by zero segments (e.g. "One Lakh  Rupees")
+  return (result + " Only").replace(/\s+/g, ' ').trim();
 };
 
 export const getWhatsAppUrl = (phone, invoiceNumber, totalAmount, shopName) => {

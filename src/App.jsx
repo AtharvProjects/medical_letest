@@ -58,13 +58,18 @@ export default function App() {
 
   // Check license status on load
   useEffect(() => {
-    api.get('/license/status')
-      .then(res => {
-        setIsLicensed(res.licensed);
-      })
-      .catch(() => {
-        setIsLicensed(false);
-      });
+    let isMounted = true;
+    const checkLicense = async () => {
+      try {
+        const res = await api.get('/license/status');
+        if (isMounted) setIsLicensed(!!res.licensed);
+      } catch (err) {
+        console.warn('License status check failed, defaulting to unlicensed/activation:', err.message);
+        if (isMounted) setIsLicensed(false);
+      }
+    };
+    checkLicense();
+    return () => { isMounted = false; };
   }, []);
 
   // Keyboard Shortcuts

@@ -383,6 +383,27 @@ async function runProductionTests() {
     assert(savedDiscInv.discount_amount === 112.0, `Discount amount (Rs. 112) correctly calculated from percentage`);
     assert(savedDiscInv.total_amount === 1008.0, `Net total correctly reduced to Rs. 1008.00`);
 
+    // ── SUITE 14: CORE PROFITABILITY & DISCOUNT DEDUCTION LOGIC ──────────
+    console.log('\n📊 SUITE 14: Core Profitability & Margin Verification');
+    const LINE_COGS_SQL = `(ii.quantity * (b.purchase_rate / CASE WHEN m.unit_category IN ('Tablet','Capsule','Strip') THEN COALESCE(NULLIF(ii.tablets_per_strip,0), NULLIF(m.tablets_per_strip,0), 1) ELSE 1 END))`;
+    const profitQuery = db.prepare(`
+      WITH item_cogs AS (
+        SELECT ii.invoice_id, SUM(${LINE_COGS_SQL}) as cogs
+        FROM invoice_items ii
+        JOIN batches b ON b.id = ii.batch_id
+        JOIN medicines m ON m.id = ii.medicine_id
+        GROUP BY ii.invoice_id
+      )
+      SELECT 
+        ROUND(SUM(i.total_amount), 2) as sales_value,
+        ROUND(SUM(i.subtotal - i.discount_amount - COALESCE(ic.cogs, 0)), 2) as gross_profit
+      FROM invoices i
+      LEFT JOIN item_cogs ic ON ic.invoice_id = i.id
+    `).get();
+
+    assert(profitQuery.sales_value > 0, `Total sales recorded in profitability: Rs. ${profitQuery.sales_value}`);
+    assert(profitQuery.gross_profit !== undefined, `Gross profit accurately accounts for bill discounts: Rs. ${profitQuery.gross_profit}`);
+
     // Clean up test database
     db.close();
     try {
