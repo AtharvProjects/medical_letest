@@ -257,7 +257,7 @@ function getCloudServerUrl() {
       return row.value.trim().replace(/\/+$/, '');
     }
   } catch (e) {}
-  return (process.env.LICENSE_SERVER_URL || 'https://athass-license-manager.onrender.com').replace(/\/+$/, '');
+  return (process.env.LICENSE_SERVER_URL || 'https://medical-lisence-key.onrender.com').replace(/\/+$/, '');
 }
 
 function setCloudServerUrl(url) {

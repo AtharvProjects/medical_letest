@@ -9,7 +9,7 @@ export default function Activation({ onActivated }) {
   const [activeTab, setActiveTab] = useState('online'); // 'online' or 'offline'
   const [onlineKey, setOnlineKey] = useState('');
   const [offlineKey, setOfflineKey] = useState('');
-  const [serverUrl, setServerUrl] = useState('https://athass-license-manager.onrender.com');
+  const [serverUrl, setServerUrl] = useState('https://medical-lisence-key.onrender.com');
   const [showServerConfig, setShowServerConfig] = useState(false);
   const [copied, setCopied] = useState(false);
   const [loading, setLoading] = useState(true);

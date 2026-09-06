@@ -295,7 +295,7 @@ export default function Settings() {
               <Input
                 value={licenseServerUrl}
                 onChange={(e) => setLicenseServerUrl(e.target.value)}
-                placeholder="https://athass-license-manager.onrender.com"
+                placeholder="https://medical-lisence-key.onrender.com"
                 style={{ fontSize: 12 }}
               />
             </FormField>
