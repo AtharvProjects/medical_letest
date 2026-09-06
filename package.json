@@ -8,6 +8,8 @@
     "server": "node server/index.js",
     "client": "vite",
     "build": "vite build",
+    "postbuild": "npm --prefix license-manager install",
+    "start": "npm --prefix license-manager start",
     "electron:dev": "concurrently \"npm run server\" \"npm run client\" \"wait-on http://localhost:5173 && electron .\"",
     "electron:build": "node scripts/build-exe.js",
     "postinstall": "electron-builder install-app-deps",
